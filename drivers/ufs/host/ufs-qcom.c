@@ -2404,6 +2404,11 @@ static irqreturn_t ufs_qcom_mcq_esi_handler(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+static void ufs_qcom_free_esi_vectors(void *data)
+{
+	platform_device_msi_free_irqs_all(data);
+}
+
 static int ufs_qcom_config_esi(struct ufs_hba *hba)
 {
 	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
@@ -2425,12 +2430,14 @@ static int ufs_qcom_config_esi(struct ufs_hba *hba)
 		return ret; /* Continue without ESI */
 	}
 
+	ret = devm_add_action_or_reset(hba->dev, ufs_qcom_free_esi_vectors, hba->dev);
+	if (ret)
+		return ret;
+
 	struct ufs_qcom_irq *qi = devm_kcalloc(hba->dev, nr_irqs, sizeof(*qi), GFP_KERNEL);
 
-	if (!qi) {
-		platform_device_msi_free_irqs_all(hba->dev);
+	if (!qi)
 		return -ENOMEM;
-	}
 
 	for (int idx = 0; idx < nr_irqs; idx++) {
 		qi[idx].irq = msi_get_virq(hba->dev, idx);
@@ -2439,14 +2446,8 @@ static int ufs_qcom_config_esi(struct ufs_hba *hba)
 
 		ret = devm_request_irq(hba->dev, qi[idx].irq, ufs_qcom_mcq_esi_handler,
 				       IRQF_SHARED, "qcom-mcq-esi", qi + idx);
-		if (ret) {
-			/* Free previously allocated IRQs */
-			for (int j = 0; j < idx; j++)
-				devm_free_irq(hba->dev, qi[j].irq, qi + j);
-			platform_device_msi_free_irqs_all(hba->dev);
-			devm_kfree(hba->dev, qi);
+		if (ret)
 			return ret;
-		}
 	}
 
 	if (host->hw_ver.major >= 6) {
@@ -2985,22 +2986,6 @@ static int ufs_qcom_probe(struct platform_device *pdev)
 	return 0;
 }
 
-/**
- * ufs_qcom_remove - set driver_data of the device to NULL
- * @pdev: pointer to platform device handle
- *
- * Always returns 0
- */
-static void ufs_qcom_remove(struct platform_device *pdev)
-{
-	struct ufs_hba *hba =  platform_get_drvdata(pdev);
-	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
-
-	ufshcd_pltfrm_remove(pdev);
-	if (host->esi_enabled)
-		platform_device_msi_free_irqs_all(hba->dev);
-}
-
 static const struct ufs_qcom_drvdata ufs_qcom_sm8550_drvdata = {
 	.quirks = UFSHCD_QUIRK_BROKEN_LSDBS_CAP,
 	.no_phy_retention = true,
@@ -3042,7 +3027,7 @@ static const struct dev_pm_ops ufs_qcom_pm_ops = {
 
 static struct platform_driver ufs_qcom_pltform = {
 	.probe	= ufs_qcom_probe,
-	.remove = ufs_qcom_remove,
+	.remove = ufshcd_pltfrm_remove,
 	.driver	= {
 		.name	= "ufshcd-qcom",
 		.pm	= &ufs_qcom_pm_ops,

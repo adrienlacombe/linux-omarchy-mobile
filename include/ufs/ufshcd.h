@@ -1073,6 +1073,7 @@ enum ufshcd_mcq_opr {
  * @lsdb_sup: LSDBS capability
  * @mcq_enabled: is mcq ready to accept requests
  * @mcq_esi_enabled: is mcq ESI configured
+ * @mcq_esi_res: devres group owning variant completion interrupts
  * @mcq_base: Multi circular queue registers base address
  * @uhq: array of supported hardware queues
  * @mcq_opr: MCQ operation and runtime registers
@@ -1258,6 +1259,7 @@ struct ufs_hba {
 	bool lsdb_sup;
 	bool mcq_enabled;
 	bool mcq_esi_enabled;
+	void *mcq_esi_res;
 	void __iomem *mcq_base;
 	struct ufs_hw_queue *uhq;
 	struct ufshcd_mcq_opr_info_t mcq_opr[OPR_MAX];

@@ -9348,11 +9348,47 @@ err:
 	return ret;
 }
 
+static int ufshcd_setup_mcq_esi(struct ufs_hba *hba)
+{
+	void *group;
+	int ret;
+
+	if (!hba->vops || !hba->vops->config_esi)
+		return -EOPNOTSUPP;
+	if (hba->mcq_esi_res)
+		return ufshcd_mcq_vops_config_esi(hba);
+
+	group = devres_open_group(hba->dev, NULL, GFP_KERNEL);
+	if (!group)
+		return -ENOMEM;
+
+	ret = ufshcd_mcq_vops_config_esi(hba);
+	if (ret) {
+		devres_release_group(hba->dev, group);
+		return ret;
+	}
+
+	devres_close_group(hba->dev, group);
+	hba->mcq_esi_res = group;
+	return 0;
+}
+
+static void ufshcd_release_mcq_esi(struct ufs_hba *hba)
+{
+	if (!hba->mcq_esi_res)
+		return;
+
+	ufshcd_rmwl(hba, ESI_ENABLE, 0, REG_UFS_MEM_CFG);
+	devres_release_group(hba->dev, hba->mcq_esi_res);
+	hba->mcq_esi_res = NULL;
+	hba->mcq_esi_enabled = false;
+}
+
 static void ufshcd_config_mcq(struct ufs_hba *hba)
 {
 	int ret;
 
-	ret = ufshcd_mcq_vops_config_esi(hba);
+	ret = ufshcd_setup_mcq_esi(hba);
 	hba->mcq_esi_enabled = !ret;
 	dev_info(hba->dev, "ESI %sconfigured\n", ret ? "is not " : "");
 
@@ -10906,6 +10942,21 @@ static void ufshcd_wl_shutdown(struct scsi_device *sdev)
 	hba->is_powered = false;
 }
 
+static void ufshcd_free_tmf_queue(struct ufs_hba *hba)
+{
+	blk_mq_destroy_queue(hba->tmf_queue);
+	blk_put_queue(hba->tmf_queue);
+	blk_mq_free_tag_set(&hba->tmf_tag_set);
+}
+
+static void ufshcd_remove_scsi_host(struct ufs_hba *hba)
+{
+	if (hba->scsi_host_added) {
+		scsi_remove_host(hba->host);
+		hba->scsi_host_added = false;
+	}
+}
+
 /**
  * ufshcd_remove - de-allocate SCSI host and host memory space
  *		data structure memory
@@ -10920,14 +10971,12 @@ void ufshcd_remove(struct ufs_hba *hba)
 	ufs_rpmb_remove(hba);
 	ufs_sysfs_remove_nodes(hba->dev);
 	cancel_delayed_work_sync(&hba->ufs_rtc_update_work);
-	blk_mq_destroy_queue(hba->tmf_queue);
-	blk_put_queue(hba->tmf_queue);
-	blk_mq_free_tag_set(&hba->tmf_tag_set);
-	if (hba->scsi_host_added)
-		scsi_remove_host(hba->host);
+	ufshcd_free_tmf_queue(hba);
+	ufshcd_remove_scsi_host(hba);
 	/* disable interrupts */
 	ufshcd_disable_intr(hba, hba->intr_mask);
 	ufshcd_hba_stop(hba);
+	ufshcd_release_mcq_esi(hba);
 	ufshcd_hba_exit(hba);
 }
 EXPORT_SYMBOL_GPL(ufshcd_remove);
@@ -11136,10 +11185,35 @@ free_tmf_tag_set:
 	blk_mq_free_tag_set(&hba->tmf_tag_set);
 
 remove_scsi_host:
-	if (hba->scsi_host_added)
-		scsi_remove_host(hba->host);
+	ufshcd_remove_scsi_host(hba);
 
 	return err;
+}
+
+static void ufshcd_abort_init(struct ufs_hba *hba)
+{
+	bool scan_pending = hba->scsi_host_added;
+
+	/* Prevent recovery and clock gating while the failed probe unwinds. */
+	scoped_guard(spinlock_irq, hba->host->host_lock)
+		hba->ufshcd_state = UFSHCD_STATE_ERROR;
+	disable_work_sync(&hba->eh_work);
+	disable_work_sync(&hba->eeh_work);
+
+	ufshcd_hold(hba);
+	ufshcd_writel(hba, 0, REG_INTERRUPT_ENABLE);
+	ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
+	ufshcd_hba_stop(hba);
+	devm_free_irq(hba->dev, hba->irq, hba);
+	hba->is_irq_enabled = false;
+	ufshcd_release_mcq_esi(hba);
+	ufshcd_release(hba);
+
+	if (scan_pending) {
+		ufshcd_remove_scsi_host(hba);
+		ufshcd_free_tmf_queue(hba);
+		pm_runtime_put_noidle(hba->dev);
+	}
 }
 
 /**
@@ -11320,7 +11394,7 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 		dev_err(hba->dev, "Host controller enable failed\n");
 		ufshcd_print_evt_hist(hba);
 		ufshcd_print_host_state(hba);
-		goto out_disable;
+		goto out_abort_init;
 	}
 
 	INIT_DELAYED_WORK(&hba->rpm_dev_flush_recheck_work, ufshcd_rpm_dev_flush_recheck_work);
@@ -11334,7 +11408,7 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 
 	err = ufshcd_add_scsi_host(hba);
 	if (err)
-		goto out_disable;
+		goto out_abort_init;
 
 	/* Hold auto suspend until async scan completes */
 	pm_runtime_get_sync(dev);
@@ -11354,7 +11428,7 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 
 	err = ufshcd_link_startup(hba);
 	if (err)
-		goto out_disable;
+		goto out_abort_init;
 
 	if (hba->mcq_enabled)
 		ufshcd_config_mcq(hba);
@@ -11371,23 +11445,23 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 	/* Verify device initialization by sending NOP OUT UPIU */
 	err = ufshcd_verify_dev_init(hba);
 	if (err)
-		goto out_disable;
+		goto out_abort_init;
 
 	/* Initiate UFS initialization, and waiting until completion */
 	err = ufshcd_complete_dev_init(hba);
 	if (err)
-		goto out_disable;
+		goto out_abort_init;
 
 	err = ufshcd_device_params_init(hba);
 	if (err)
-		goto out_disable;
+		goto out_abort_init;
 
 	err = ufshcd_post_device_init(hba);
 
 initialized:
 	ufshcd_process_probe_result(hba, probe_start, err);
 	if (err)
-		goto out_disable;
+		goto out_abort_init;
 
 	ufs_sysfs_add_nodes(hba->dev);
 	hba->dme_qos_sysfs_handle = sysfs_get_dirent(hba->dev->kobj.sd,
@@ -11407,8 +11481,9 @@ initialized:
 		ufshcd_pm_qos_init(hba);
 	return 0;
 
+out_abort_init:
+	ufshcd_abort_init(hba);
 out_disable:
-	hba->is_irq_enabled = false;
 	ufshcd_hba_exit(hba);
 out_error:
 	return err > 0 ? -EIO : err;

@@ -2257,6 +2257,13 @@ static irqreturn_t ufs_mtk_mcq_intr(int irq, void *__intr_info)
 	return IRQ_HANDLED;
 }
 
+static void ufs_mtk_disable_mcq_irq(void *data)
+{
+	struct ufs_hba *hba = data;
+
+	ufshcd_rmwl(hba, MCQ_INTR_EN_MSK, 0, REG_UFS_MMIO_OPT_CTRL_0);
+}
+
 static int ufs_mtk_config_mcq_irq(struct ufs_hba *hba)
 {
 	struct ufs_mtk_host *host = ufshcd_get_variant(hba);
@@ -2279,6 +2286,11 @@ static int ufs_mtk_config_mcq_irq(struct ufs_hba *hba)
 		if (ret)
 			return ret;
 	}
+
+	ret = devm_add_action_or_reset(hba->dev, ufs_mtk_disable_mcq_irq, hba);
+	if (ret)
+		return ret;
+
 	host->is_mcq_intr_enabled = true;
 
 	return 0;
