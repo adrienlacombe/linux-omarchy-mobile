@@ -37,6 +37,18 @@ config DEBUG_PINCTRL
 	help
 	  Say Y here to add some extra checks and diagnostics to PINCTRL calls.
 
+config PINCTRL_GOOGLE_MALIBU_HSIOS
+	tristate "Google Malibu HSIO-S UFS pin control"
+	depends on ARM64 || COMPILE_TEST
+	depends on OF && PM && PM_GENERIC_DOMAINS && HAS_IOMEM && GPIOLIB
+	select GENERIC_PINCONF
+	select PINMUX
+	help
+	  Control the three GPIO outputs and the reference clock pad used by
+	  UFS on Google Tensor G6. HSIO-S GPIO access requires its CSR power
+	  domain. Other HSIO-S pads and interrupts are outside this driver.
+	  Select this when bringing up the UFS host on a Malibu board.
+
 config PINCTRL_GOOGLE_MALIBU_LSIOE
 	tristate "Google Malibu LSIOE I2C3 pin control"
 	depends on ARM64 || COMPILE_TEST

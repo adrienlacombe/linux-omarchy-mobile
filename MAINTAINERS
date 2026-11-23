@@ -11185,6 +11185,7 @@ F:	Documentation/devicetree/bindings/interrupt-controller/google,malibu-sgia.yam
 F:	Documentation/devicetree/bindings/mailbox/google,malibu-mba-v3-queue.yaml
 F:	Documentation/devicetree/bindings/phy/google,lga-usb-phy.yaml
 F:	Documentation/devicetree/bindings/phy/google,malibu-usb2-phy.yaml
+F:	Documentation/devicetree/bindings/pinctrl/google,malibu-hsios-ufs-pinctrl.yaml
 F:	Documentation/devicetree/bindings/pinctrl/google,malibu-lsioe-i2c3-pinctrl.yaml
 F:	Documentation/devicetree/bindings/phy/google,zuma-pcie-phy.yaml
 F:	Documentation/devicetree/bindings/soc/google/google,gs101-dtzpc.yaml
@@ -11213,6 +11214,7 @@ F:	drivers/soc/samsung/gs101-pmu.c
 F:	drivers/phy/samsung/phy-gs101-ufs.c
 F:	drivers/phy/samsung/phy-zuma-pcie.c
 F:	drivers/phy/samsung/phy-zumapro-ufs.c
+F:	drivers/pinctrl/pinctrl-google-malibu-hsios.c
 F:	drivers/pinctrl/pinctrl-google-malibu-lsioe.c
 F:	drivers/spmi/spmi-google-malibu.c
 F:	drivers/thermal/samsung/gs101_acpm_tmu.c

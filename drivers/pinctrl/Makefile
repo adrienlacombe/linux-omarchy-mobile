@@ -10,6 +10,7 @@ obj-$(CONFIG_GENERIC_PINCONF)	+= pinconf-generic.o
 obj-$(CONFIG_GENERIC_PINCTRL)	+= pinctrl-generic.o
 obj-$(CONFIG_OF)		+= devicetree.o
 
+obj-$(CONFIG_PINCTRL_GOOGLE_MALIBU_HSIOS) += pinctrl-google-malibu-hsios.o
 obj-$(CONFIG_PINCTRL_GOOGLE_MALIBU_LSIOE) += pinctrl-google-malibu-lsioe.o
 obj-$(CONFIG_PINCTRL_AMD)	+= pinctrl-amd.o
 obj-$(CONFIG_PINCTRL_AMDISP)	+= pinctrl-amdisp.o
