@@ -109,6 +109,10 @@ int ufs_malibu_device_on(struct ufs_malibu_device *device, bool hs_lss)
 	    (hs_lss && (!device->lss || gpiod_is_active_low(device->lss))))
 		return -EINVAL;
 
+	ret = pinctrl_select_state(device->pinctrl, device->gpio_prepare);
+	if (ret)
+		return ret;
+
 	device->stage = MALIBU_DEVICE_PINS;
 	ret = pinctrl_select_state(device->pinctrl, device->refclk_on);
 	if (ret)

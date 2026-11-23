@@ -18,11 +18,12 @@ struct ufs_malibu_phy {
 	bool hs_lss;
 	bool pmc_workaround;
 	bool initialized;
+	bool power_ready;
 };
 
 int ufs_malibu_phy_read_config(struct device *dev, struct ufs_malibu_phy *phy);
 int ufs_malibu_phy_prepare(struct ufs_malibu_phy *phy);
-int ufs_malibu_phy_check_power(struct ufs_malibu_phy *phy);
+int ufs_malibu_phy_post_power_on(struct ufs_malibu_phy *phy, u32 refclk_wait_us);
 int ufs_malibu_phy_init(struct ufs_hba *hba, struct ufs_malibu_phy *phy);
 
 #endif /* _UFS_MALIBU_PHY_H */

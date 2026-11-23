@@ -32,6 +32,7 @@ struct ufs_malibu_device {
 	struct gpio_desc *lss;
 	struct clk *refclk;
 	struct pinctrl *pinctrl;
+	struct pinctrl_state *gpio_prepare;
 	struct pinctrl_state *refclk_on;
 	struct pinctrl_state *refclk_off;
 	enum malibu_device_stage stage;

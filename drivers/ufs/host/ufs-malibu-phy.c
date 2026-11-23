@@ -21,6 +21,11 @@
 #define MALIBU_UFS_TOP_NO_PATCH_MASK	GENMASK(19, 16)
 #define MALIBU_UFS_REXT_TRIM		GENMASK(5, 0)
 #define MALIBU_UFS_REXT_OVERRIDE	BIT(6)
+#define MALIBU_UFS_SS_REFCLK_CTRL	0x000
+#define MALIBU_UFS_SS_REFCLK_DELAY	0x004
+#define MALIBU_UFS_SS_REFCLK_AUX_DELAY	0x008
+#define MALIBU_UFS_SS_REFCLK_ENABLE	BIT(0)
+#define MALIBU_UFS_REFCLK_WAIT_US	0xff
 #define MALIBU_UFS_SS_PHY_STATUS	0x014
 #define MALIBU_UFS_SS_PHY_BUSY		GENMASK(3, 0)
 #define MALIBU_UFS_PSM_STATE		GENMASK(4, 0)
@@ -133,6 +138,7 @@ int ufs_malibu_phy_prepare(struct ufs_malibu_phy *phy)
 	int ret;
 
 	phy->initialized = false;
+	phy->power_ready = false;
 	ret = readl_poll_timeout(phy->psm, status,
 				 (status & MALIBU_UFS_PSM_STATE) == MALIBU_UFS_PSM_OFF,
 				 10, 10000);
@@ -150,20 +156,33 @@ int ufs_malibu_phy_prepare(struct ufs_malibu_phy *phy)
 	return 0;
 }
 
-/* Check the PHY PSM and UFS TOP before permitting accesses to the HCI. */
-int ufs_malibu_phy_check_power(struct ufs_malibu_phy *phy)
+/* The caller holds the core power domain; zero selects the pre-discovery delay. */
+int ufs_malibu_phy_post_power_on(struct ufs_malibu_phy *phy, u32 refclk_wait_us)
 {
 	u32 status;
 	int ret;
 
+	phy->power_ready = false;
 	ret = readl_poll_timeout(phy->psm, status,
 				 (status & MALIBU_UFS_PSM_STATE) == MALIBU_UFS_PSM_ON,
 				 10, 10000);
 	if (ret)
 		return ret;
 
-	return readl_poll_timeout(phy->top + MALIBU_UFS_TOP_STATUS, status,
-				  status & MALIBU_UFS_TOP_POWER_READY, 10, 400);
+	ret = readl_poll_timeout(phy->top + MALIBU_UFS_TOP_STATUS, status,
+				 status & MALIBU_UFS_TOP_POWER_READY, 10, 400);
+	if (ret)
+		return ret;
+
+	status = readl(phy->subsystem + MALIBU_UFS_SS_REFCLK_CTRL);
+	writel(status | MALIBU_UFS_SS_REFCLK_ENABLE, phy->subsystem + MALIBU_UFS_SS_REFCLK_CTRL);
+	writel(0, phy->subsystem + MALIBU_UFS_SS_REFCLK_AUX_DELAY);
+	writel(refclk_wait_us ?: MALIBU_UFS_REFCLK_WAIT_US,
+	       phy->subsystem + MALIBU_UFS_SS_REFCLK_DELAY);
+	readl(phy->subsystem + MALIBU_UFS_SS_REFCLK_DELAY);
+	phy->power_ready = true;
+
+	return 0;
 }
 
 static int malibu_apply_calibration(struct ufs_hba *hba, struct ufs_malibu_phy *phy)

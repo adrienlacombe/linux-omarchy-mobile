@@ -12,7 +12,7 @@ static int ufs_malibu_prepare_link_startup(struct ufs_hba *hba)
 {
 	struct ufs_malibu *ufs = ufshcd_get_variant(hba);
 
-	if (!ufs || ufs->device.stage != MALIBU_DEVICE_ON)
+	if (!ufs || ufs->device.stage != MALIBU_DEVICE_ON || !ufs->phy.power_ready)
 		return -EHOSTDOWN;
 
 	ufshcd_writel(hba, 200, MALIBU_UFS_HCI_LINK_CONFIG);
