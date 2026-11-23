@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/mailbox/google,malibu-mba-v3-queue.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Tensor G6 MBA v3 firmware mailbox queue
+
+maintainers:
+  - Peter Griffin <peter.griffin@linaro.org>
+
+description: |
+  The MBA v3 queue exchanges four-word frames with a firmware processor.
+  Its hardware slots are addressed through one mailbox channel. The
+  channel specifier is 0. The client manages firmware request and reply
+  correlation and queues transmissions asynchronously. The queue starts
+  from a fresh host boot, before the host has used any slots.
+
+properties:
+  compatible:
+    const: google,malibu-mba-v3-queue
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  '#mbox-cells':
+    const: 1
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - '#mbox-cells'
+
+additionalProperties: false

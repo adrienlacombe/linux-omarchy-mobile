@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/phy/google,malibu-usb2-phy.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Tensor G6 Malibu USB2 PHY
+
+maintainers:
+  - Peter Griffin <peter.griffin@linaro.org>
+
+description: |
+  The Malibu eUSB2 PHY connects the DWC3 controller to a high-speed USB
+  path. It takes USB role notifications and can apply USB2 resistor trim
+  values from NVMEM.
+
+properties:
+  compatible:
+    const: google,malibu-usb2-phy
+
+  reg:
+    items:
+      - description: PHY top register window containing the VBUS controls.
+
+  reg-names:
+    const: usbdp_top
+
+  '#phy-cells':
+    const: 1
+    description: The only supported PHY index is 0 for USB high-speed.
+
+  clocks:
+    maxItems: 1
+
+  clock-names:
+    const: usb2
+
+  resets:
+    maxItems: 1
+
+  reset-names:
+    const: usb2
+
+  power-domains:
+    maxItems: 1
+
+  usb-role-switch:
+    $ref: /schemas/types.yaml#/definitions/flag
+
+  google,usb-cfg-csr:
+    description: Syscon and offset of the USB2 configuration registers.
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    items:
+      - items:
+          - description: Configuration syscon phandle.
+          - description: USB2 configuration register offset.
+
+  nvmem-cells:
+    items:
+      - description: USB2 external resistor mode bit.
+      - description: USB2 resistor trim code.
+
+  nvmem-cell-names:
+    items:
+      - const: usb2-rext-external-mode
+      - const: usb2-rext-ctrl
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - '#phy-cells'
+  - clocks
+  - clock-names
+  - resets
+  - reset-names
+  - power-domains
+  - usb-role-switch
+  - google,usb-cfg-csr
+
+dependencies:
+  nvmem-cells: [nvmem-cell-names]
+  nvmem-cell-names: [nvmem-cells]
+
+additionalProperties: false

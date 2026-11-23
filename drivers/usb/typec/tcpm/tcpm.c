@@ -5681,6 +5681,14 @@ static void run_state_machine(struct tcpm_port *port)
 			break;
 		}
 		tcpm_set_cc(port, TYPEC_CC_RD);
+		/* A fixed sink can keep Rd through reset without a new CC alert. */
+		if (port->tcpc->resample_sink_after_reset &&
+		    port->port_type == TYPEC_PORT_SNK &&
+		    port->prev_state == PORT_RESET_WAIT_OFF) {
+			tcpm_log_force(port, "resampling CC and VBUS after sink reset");
+			tcpm_vbus_change(port);
+			tcpm_cc_change(port);
+		}
 		if (port->port_type == TYPEC_PORT_DRP)
 			tcpm_set_state(port, SRC_UNATTACHED, PD_T_DRP_SRC);
 		break;

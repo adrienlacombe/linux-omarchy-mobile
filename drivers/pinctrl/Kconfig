@@ -37,6 +37,18 @@ config DEBUG_PINCTRL
 	help
 	  Say Y here to add some extra checks and diagnostics to PINCTRL calls.
 
+config PINCTRL_GOOGLE_MALIBU_LSIOE
+	tristate "Google Malibu LSIOE I2C3 pin control"
+	depends on ARM64 || COMPILE_TEST
+	depends on OF && PM && HAS_IOMEM
+	select GENERIC_PINCONF
+	select PINMUX
+	help
+	  Control the two LSIOE pads used by I2C3 on Google Tensor G6.
+	  The driver supports the I2C3 mux and the GPIO input sleep state.
+	  The pad registers are powered through the LSIOE CSR domain.
+	  Select this when using the Malibu LSIOE I2C3 bus.
+
 config PINCTRL_AMD
 	bool "AMD GPIO pin control"
 	depends on HAS_IOMEM

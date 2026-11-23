@@ -106,6 +106,17 @@ config COMMON_CLK_HI655X
 	  multi-function device has one fixed-rate oscillator, clocked
 	  at 32KHz.
 
+config COMMON_CLK_GOOGLE_MALIBU_CPM
+	bool "Google Malibu CPM I/O resource controller"
+	depends on ARM64 && OF && MAILBOX && RESET_CONTROLLER && PM
+	select PM_GENERIC_DOMAINS
+	select REGULATOR
+	help
+	  Support firmware-managed gates, resets and power domains for
+	  the Google Malibu external USB controller and its I2C3 bus.
+	  The driver uses paired MBA queues to exchange messages with
+	  CPM firmware.
+
 config COMMON_CLK_SCMI
 	tristate "Clock driver controlled via SCMI interface"
 	depends on ARM_SCMI_PROTOCOL || COMPILE_TEST

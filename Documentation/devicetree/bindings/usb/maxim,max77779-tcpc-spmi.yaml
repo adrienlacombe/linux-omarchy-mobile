@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/usb/maxim,max77779-tcpc-spmi.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Maxim MAX77779 SPMI USB Type-C controller
+
+maintainers:
+  - Peter Griffin <peter.griffin@linaro.org>
+
+description: |
+  The MAX77779 Type-C controller is accessible over SPMI. This binding
+  describes USB2 sink mode without USB Power Delivery. The controller
+  reports changes through a level-low alert and controls the USB2 data
+  switch before requesting the local device session.
+
+properties:
+  compatible:
+    const: maxim,max77779-tcpc-spmi
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  maxim,usb2-role-switch:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: USB2 session switch that gates the local PHY and repeater.
+
+  connector:
+    $ref: /schemas/connector/usb-connector.yaml#
+    unevaluatedProperties: false
+    properties:
+      compatible:
+        const: usb-c-connector
+      power-role:
+        const: sink
+      data-role:
+        const: device
+      typec-power-opmode:
+        const: default
+      self-powered: false
+      port: false
+      ports: false
+    required:
+      - compatible
+      - power-role
+      - data-role
+      - typec-power-opmode
+      - pd-disable
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - maxim,usb2-role-switch
+  - connector
+
+additionalProperties: false

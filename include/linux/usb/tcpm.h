@@ -122,6 +122,8 @@ enum tcpm_transmit_type {
  * @cable_comm_capable
  *		Optional; Returns whether cable communication over SOP' is supported
  *		by the tcpc
+ * @resample_sink_after_reset:
+ *		Optional; Resample CC and VBUS when a fixed sink exits port reset.
  * @attempt_vconn_swap_discovery:
  *		Optional; The callback is called by the TCPM when the result of
  *		a Discover Identity request indicates that the port partner is
@@ -133,6 +135,7 @@ enum tcpm_transmit_type {
  */
 struct tcpc_dev {
 	struct fwnode_handle *fwnode;
+	bool resample_sink_after_reset;
 
 	int (*init)(struct tcpc_dev *dev);
 	int (*get_vbus)(struct tcpc_dev *dev);

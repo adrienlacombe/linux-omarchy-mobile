@@ -59,6 +59,15 @@ config USB_EMI26
 	  To compile this driver as a module, choose M here: the
 	  module will be called emi26.
 
+config USB_TUSB2E11
+	tristate "Texas Instruments TUSB2E11 eUSB2 repeater"
+	depends on I2C && REGULATOR && USB_ROLE_SWITCH
+	help
+	  Support regulator-controlled operation of the TUSB2E11 eUSB2
+	  repeater. A USB role switch manages the supply sequence for
+	  host and device roles and releases the supplies on disconnect.
+	  This driver is used on platforms such as Google Grizzly.
+
 config USB_ADUTUX
 	tristate "ADU devices from Ontrak Control Systems"
 	help

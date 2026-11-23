@@ -39,6 +39,7 @@ struct tcpci {
 	struct regmap *regmap;
 	unsigned int alert_mask;
 	unsigned int rx_type_mask;
+	int init_status;
 
 	bool controls_vbus;
 
@@ -424,6 +425,9 @@ static int tcpci_enable_frs(struct tcpc_dev *dev, bool enable)
 	struct tcpci *tcpci = tcpc_to_tcpci(dev);
 	int ret;
 
+	if (tcpci->data->skip_pd)
+		return enable ? -EOPNOTSUPP : 0;
+
 	/* To prevent disconnect during FRS, set disconnect threshold to 3.5V */
 	ret = tcpci_write16(tcpci, TCPC_VBUS_SINK_DISCONNECT_THRESH, enable ? 0 : 0x8c);
 	if (ret < 0)
@@ -466,6 +470,13 @@ static int tcpci_set_roles(struct tcpc_dev *tcpc, bool attached,
 	unsigned int reg;
 	int ret;
 
+	if (tcpci->data->skip_pd) {
+		if (attached && READ_ONCE(tcpci->init_status))
+			return -EAGAIN;
+		return tcpci->data->set_roles ?
+			tcpci->data->set_roles(tcpci, tcpci->data, attached, role, data) : 0;
+	}
+
 	reg = FIELD_PREP(TCPC_MSG_HDR_INFO_REV, PD_REV20);
 	if (role == TYPEC_SOURCE)
 		reg |= TCPC_MSG_HDR_INFO_PWR_ROLE;
@@ -476,7 +487,7 @@ static int tcpci_set_roles(struct tcpc_dev *tcpc, bool attached,
 		return ret;
 
 	if (tcpci->data->set_roles)
-		tcpci->data->set_roles(tcpci, tcpci->data, attached, role, data);
+		return tcpci->data->set_roles(tcpci, tcpci->data, attached, role, data);
 
 	return 0;
 }
@@ -488,6 +499,8 @@ static int tcpci_set_pd_rx(struct tcpc_dev *tcpc, bool enable)
 	int ret;
 
 	if (enable) {
+		if (tcpci->data->skip_pd)
+			return -EOPNOTSUPP;
 		reg = TCPC_RX_DETECT_SOP | TCPC_RX_DETECT_HARD_RESET;
 		if (tcpci->data->cable_comm_capable)
 			reg |= TCPC_RX_DETECT_SOP1;
@@ -507,9 +520,13 @@ static int tcpci_get_vbus(struct tcpc_dev *tcpc)
 	unsigned int reg;
 	int ret;
 
+	if (tcpci->data->skip_pd && READ_ONCE(tcpci->init_status))
+		return 0;
 	ret = regmap_read(tcpci->regmap, TCPC_POWER_STATUS, &reg);
 	if (ret < 0)
-		return ret;
+		return tcpci->data->skip_pd ? 0 : ret;
+	if (tcpci->data->skip_pd && (reg & TCPC_POWER_STATUS_UNINIT))
+		return 0;
 
 	return !!(reg & TCPC_POWER_STATUS_VBUS_PRES);
 }
@@ -580,6 +597,8 @@ static int tcpci_pd_transmit(struct tcpc_dev *tcpc, enum tcpm_transmit_type type
 	unsigned int reg, cnt;
 	int ret;
 
+	if (tcpci->data->skip_pd)
+		return -EOPNOTSUPP;
 	cnt = msg ? pd_header_cnt(header) * 4 : 0;
 	/**
 	 * TCPCI spec forbids direct access of TCPC_TX_DATA.
@@ -651,7 +670,7 @@ static bool tcpci_attempt_vconn_swap_discovery(struct tcpc_dev *tcpc)
 	return false;
 }
 
-static int tcpci_init(struct tcpc_dev *tcpc)
+static int tcpci_hw_init(struct tcpc_dev *tcpc)
 {
 	struct tcpci *tcpci = tcpc_to_tcpci(tcpc);
 	unsigned long timeout = jiffies + msecs_to_jiffies(2000); /* XXX */
@@ -699,9 +718,11 @@ static int tcpci_init(struct tcpc_dev *tcpc)
 	if (ret < 0)
 		return ret;
 
-	reg = TCPC_ALERT_TX_SUCCESS | TCPC_ALERT_TX_FAILED |
-		TCPC_ALERT_TX_DISCARDED | TCPC_ALERT_RX_STATUS |
-		TCPC_ALERT_RX_HARD_RST | TCPC_ALERT_CC_STATUS;
+	reg = TCPC_ALERT_CC_STATUS;
+	if (!tcpci->data->skip_pd)
+		reg |= TCPC_ALERT_TX_SUCCESS | TCPC_ALERT_TX_FAILED |
+		       TCPC_ALERT_TX_DISCARDED | TCPC_ALERT_RX_STATUS |
+		       TCPC_ALERT_RX_HARD_RST;
 	if (tcpci->controls_vbus)
 		reg |= TCPC_ALERT_POWER_STATUS;
 	/* Enable VSAFE0V status interrupt when detecting VSAFE0V is supported */
@@ -714,8 +735,27 @@ static int tcpci_init(struct tcpc_dev *tcpc)
 	}
 
 	tcpci->alert_mask = reg;
+	if (tcpci->data->skip_pd)
+		return tcpci_write16(tcpci, TCPC_ALERT_MASK, reg);
 
 	return 0;
+}
+
+static int tcpci_init(struct tcpc_dev *tcpc)
+{
+	struct tcpci *tcpci = tcpc_to_tcpci(tcpc);
+	int ret;
+
+	if (!tcpci->data->skip_pd)
+		return tcpci_hw_init(tcpc);
+
+	/* TCPM can call init again after the controller resets. */
+	WRITE_ONCE(tcpci->init_status, -EAGAIN);
+	ret = tcpci_set_roles(tcpc, false, TYPEC_SINK, TYPEC_DEVICE);
+	if (!ret)
+		ret = tcpci_hw_init(tcpc);
+	WRITE_ONCE(tcpci->init_status, ret);
+	return ret;
 }
 
 irqreturn_t tcpci_irq(struct tcpci *tcpci)
@@ -857,7 +897,9 @@ struct tcpci *tcpci_register_port(struct device *dev, struct tcpci_data *data)
 	tcpci->dev = dev;
 	tcpci->data = data;
 	tcpci->regmap = data->regmap;
+	tcpci->init_status = -EAGAIN;
 
+	tcpci->tcpc.resample_sink_after_reset = data->resample_sink_after_reset;
 	tcpci->tcpc.init = tcpci_init;
 	tcpci->tcpc.get_vbus = tcpci_get_vbus;
 	tcpci->tcpc.set_vbus = tcpci_set_vbus;
@@ -903,6 +945,11 @@ struct tcpci *tcpci_register_port(struct device *dev, struct tcpci_data *data)
 	if (IS_ERR(tcpci->port)) {
 		fwnode_handle_put(tcpci->tcpc.fwnode);
 		return ERR_CAST(tcpci->port);
+	}
+	err = READ_ONCE(tcpci->init_status);
+	if (data->skip_pd && err) {
+		tcpci_unregister_port(tcpci);
+		return ERR_PTR(err);
 	}
 
 	return tcpci;

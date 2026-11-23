@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/gpio/google,malibu-aoss-alert-gpio.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Tensor G6 AOSS Type-C alert GPIO
+
+maintainers:
+  - Peter Griffin <peter.griffin@linaro.org>
+
+description: |
+  The Malibu AOSS block contains 123 pad slots, with a dedicated interrupt
+  route from the GPIO input at offset 97 to an always-on SGIA input.
+  This binding describes the bank in its Type-C alert input configuration.
+  GPIO specifiers use the physical pad index and standard GPIO flags. The
+  only supported GPIO index is 97. Interrupt specifiers use the pad index
+  followed by IRQ_TYPE_LEVEL_LOW. The pad's interrupt parent uses the SGIA
+  input number. The GPIO input is pulled up and cannot source an output.
+
+properties:
+  $nodename:
+    pattern: "^gpio@[0-9a-f]+$"
+
+  compatible:
+    const: google,malibu-aoss-alert-gpio
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  gpio-controller: true
+
+  "#gpio-cells":
+    const: 2
+
+  interrupt-controller: true
+
+  "#interrupt-cells":
+    const: 2
+
+  "#address-cells":
+    const: 0
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - gpio-controller
+  - "#gpio-cells"
+  - interrupt-controller
+  - "#interrupt-cells"
+  - "#address-cells"
+
+additionalProperties: false

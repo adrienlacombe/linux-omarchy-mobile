@@ -1,0 +1,238 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+#include <dt-bindings/clock/google,malibu-cpm-io.h>
+
+/ {
+	usb_ref_clk: clock-usb-ref {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <19200000>;
+	};
+
+	usb_bus_clk: clock-usb-bus {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <250000000>;
+	};
+
+	usb_suspend_clk: clock-usb-suspend {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <200000>;
+	};
+
+	amb_smmu: iommu@4190000 {
+		compatible = "arm,smmu-v3";
+		reg = <0x0 0x04190000 0x0 0x20000>;
+		#iommu-cells = <1>;
+		dma-coherent;
+		interrupts-extended = <&fabstby_sgia 0xf>, <&fabstby_sgia 0x11>,
+				      <&fabstby_sgia 0x16>;
+		interrupt-names = "eventq", "gerror", "priq";
+		status = "disabled";
+	};
+
+	fabstby_sgia: interrupt-controller@4371000 {
+		compatible = "google,malibu-pulse-sgia";
+		reg = <0x0 0x04371000 0x0 0x20>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		#address-cells = <0>;
+		interrupts = <GIC_SPI 0xf4 IRQ_TYPE_LEVEL_HIGH 0>;
+		status = "disabled";
+	};
+
+	hsion_sgia: interrupt-controller@a1cd060 {
+		compatible = "google,malibu-level-sgia";
+		reg = <0x0 0x0a1cd060 0x0 0x20>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		#address-cells = <0>;
+		interrupts = <GIC_SPI 0x162 IRQ_TYPE_LEVEL_HIGH 0>;
+		power-domains = <&cpm MALIBU_CPM_PD_HSION>;
+		status = "disabled";
+	};
+
+	usb2_cfg: syscon@a200014 {
+		compatible = "google,malibu-usb2-config", "syscon";
+		reg = <0x0 0x0a200014 0x0 0xc>;
+		status = "disabled";
+	};
+
+	usb: usb@a200028 {
+		compatible = "google,malibu-dwc3";
+		reg = <0x0 0x0a200028 0x0 0x8>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		dma-ranges = <0x0 0x0 0x0 0x0 0x1 0x0>;
+		clocks = <&cpm MALIBU_CPM_CLK_USBC_NON_STICKY>,
+			 <&cpm MALIBU_CPM_CLK_USBC_STICKY>,
+			 <&cpm MALIBU_CPM_CLK_USB2_APB>;
+		clock-names = "non-sticky", "sticky", "usb2-apb";
+		resets = <&cpm MALIBU_CPM_RST_USBC_NON_STICKY>,
+			 <&cpm MALIBU_CPM_RST_USBC_STICKY>,
+			 <&cpm MALIBU_CPM_RST_USB_DRD_BUS>,
+			 <&cpm MALIBU_CPM_RST_USB2_APB>,
+			 <&cpm MALIBU_CPM_RST_USB_TOP>;
+		reset-names = "non-sticky", "sticky", "drd-bus", "usb2-apb", "top";
+		power-domains = <&cpm MALIBU_CPM_PD_USB_PSW>, <&cpm MALIBU_CPM_PD_USB_TOP>;
+		power-domain-names = "psw", "top";
+		status = "disabled";
+
+		dwc3: usb@a210000 {
+			compatible = "snps,dwc3";
+			reg = <0x0 0x0a210000 0x0 0xd060>;
+			interrupts-extended = <&hsion_sgia 0x17>;
+			clocks = <&usb_ref_clk>, <&usb_bus_clk>, <&usb_suspend_clk>;
+			clock-names = "ref", "bus_early", "suspend";
+			phys = <&usb2_phy 0>;
+			phy-names = "usb2-phy";
+			iommus = <&amb_smmu 0x8200>;
+			dma-coherent;
+			dr_mode = "peripheral";
+			maximum-speed = "high-speed";
+			snps,gfladj-refclk-lpm-sel-quirk;
+			snps,incr-burst-type-adjustment = <4>;
+			snps,quirk-frame-length-adjustment = <0x20>;
+			snps,usb2-gadget-lpm-disable;
+		};
+	};
+
+	usb2_phy: phy@a2b3000 {
+		compatible = "google,malibu-usb2-phy";
+		reg = <0x0 0x0a2b3000 0x0 0x80>;
+		reg-names = "usbdp_top";
+		#phy-cells = <1>;
+		clocks = <&cpm MALIBU_CPM_CLK_USB2_PHY>;
+		clock-names = "usb2";
+		resets = <&cpm MALIBU_CPM_RST_USB2_PHY>;
+		reset-names = "usb2";
+		power-domains = <&cpm MALIBU_CPM_PD_USB_TOP>;
+		usb-role-switch;
+		google,usb-cfg-csr = <&usb2_cfg 0>;
+		status = "disabled";
+	};
+
+	cpm_tx: mailbox@ea60000 {
+		compatible = "google,malibu-mba-v3-queue";
+		reg = <0x0 0x0ea60000 0x0 0x1000>;
+		#mbox-cells = <1>;
+		interrupts = <GIC_SPI 0xf IRQ_TYPE_LEVEL_HIGH 0>;
+		status = "disabled";
+	};
+
+	cpm_rx: mailbox@ea61000 {
+		compatible = "google,malibu-mba-v3-queue";
+		reg = <0x0 0x0ea61000 0x0 0x1000>;
+		#mbox-cells = <1>;
+		interrupts = <GIC_SPI 0x10 IRQ_TYPE_LEVEL_HIGH 0>;
+		status = "disabled";
+	};
+
+	cpm: system-controller {
+		compatible = "google,malibu-cpm-io";
+		#clock-cells = <1>;
+		#reset-cells = <1>;
+		#power-domain-cells = <1>;
+		mboxes = <&cpm_tx 0>, <&cpm_rx 0>;
+		mbox-names = "tx", "rx";
+		status = "disabled";
+	};
+
+	spmi_cpm: spmi@ebf1000 {
+		compatible = "google,malibu-smartdv-spmi";
+		reg = <0x0 0x0ebf1000 0x0 0x100>;
+		#address-cells = <2>;
+		#size-cells = <0>;
+		status = "disabled";
+	};
+
+	lsioe_sgia: interrupt-controller@3a0d2020 {
+		compatible = "google,malibu-level-sgia";
+		reg = <0x0 0x3a0d2020 0x0 0x20>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		#address-cells = <0>;
+		interrupts = <GIC_SPI 0x18c IRQ_TYPE_LEVEL_HIGH 0>;
+		power-domains = <&cpm MALIBU_CPM_PD_LSIOE>;
+		status = "disabled";
+	};
+
+	lsioe_pinctrl: pinctrl@3a0e0000 {
+		compatible = "google,malibu-lsioe-i2c3-pinctrl";
+		reg = <0x0 0x3a0e0000 0x0 0x25000>;
+		power-domains = <&cpm MALIBU_CPM_PD_LSIOE_CLI>;
+		power-domain-names = "csr_access_pd";
+		status = "disabled";
+
+		i2c3_default: i2c3-default-pins {
+			pins = "XLSIOE_I23C8_SCL", "XLSIOE_I23C8_SDA";
+			function = "lsioe_i2c";
+			input-enable;
+			output-enable;
+			output-high;
+			bias-disable;
+		};
+
+		i2c3_sleep: i2c3-sleep-pins {
+			pins = "XLSIOE_I23C8_SCL", "XLSIOE_I23C8_SDA";
+			function = "lsioe_gpio";
+			input-enable;
+			output-disable;
+			bias-pull-up;
+		};
+	};
+
+	lsioe_i2c3: i2c@3a1cd000 {
+		compatible = "google,malibu-i2c", "snps,designware-i2c";
+		reg = <0x0 0x3a1cd000 0x0 0x100>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		interrupts-extended = <&lsioe_sgia 0x17>;
+		clocks = <&cpm MALIBU_CPM_CLK_I2C3>, <&cpm MALIBU_CPM_CLK_I2C3_APB>;
+		clock-names = "ref", "pclk";
+		resets = <&cpm MALIBU_CPM_RST_I2C3>;
+		power-domains = <&cpm MALIBU_CPM_PD_LSIOE_CLI>;
+		clock-frequency = <1000000>;
+		pinctrl-names = "default", "sleep";
+		pinctrl-0 = <&i2c3_default>;
+		pinctrl-1 = <&i2c3_sleep>;
+		i2c-scl-falling-time-ns = <100>;
+		i2c-sda-falling-time-ns = <100>;
+		i2c-sda-hold-time-ns = <5>;
+		status = "disabled";
+	};
+
+	aoss_alert_gpio: gpio@e500000 {
+		compatible = "google,malibu-aoss-alert-gpio";
+		reg = <0x0 0x0e500000 0x0 0x7b000>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+		#address-cells = <0>;
+		interrupts-extended = <&aoss_alert_sgia 0x15>;
+		status = "disabled";
+	};
+
+	aoss_alert_sgia: interrupt-controller@e602060 {
+		compatible = "google,malibu-level-sgia";
+		reg = <0x0 0x0e602060 0x0 0x20>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		#address-cells = <0>;
+		interrupts-extended = <&aoss_sgia 1>;
+		status = "disabled";
+	};
+
+	aoss_sgia: interrupt-controller@e6020c0 {
+		compatible = "google,malibu-level-sgia";
+		reg = <0x0 0x0e6020c0 0x0 0x20>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		#address-cells = <0>;
+		interrupts = <GIC_SPI 0x17 IRQ_TYPE_LEVEL_HIGH 0>;
+		status = "disabled";
+	};
+};

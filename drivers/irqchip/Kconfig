@@ -5,6 +5,16 @@ config IRQCHIP
 	def_bool y
 	depends on (OF_IRQ || ACPI_GENERIC_GSI)
 
+config GOOGLE_MALIBU_SGIA
+	bool "Google Tensor G6 single-bank interrupt aggregator"
+	depends on ARM64 && OF && PM_GENERIC_DOMAINS
+	select IRQ_DOMAIN
+	help
+	  Support the level and pulse single-bank interrupt aggregators
+	  in Google Tensor G6 (Malibu) SoCs. Each instance combines up
+	  to 32 fixed inputs onto one parent GIC interrupt. The HSION
+	  and LSIOE level controllers use CPM power domains.
+
 config ARM_GIC
 	bool
 	depends on OF

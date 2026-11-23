@@ -60,6 +60,10 @@ properties:
           - enum:
               - google,zumapro-tegu
           - const: google,zumapro
+      - description: Google Pixel 11 Pro (Grizzly)
+        items:
+          - const: google,malibu-grizzly
+          - const: google,malibu
 
   # Bootloader requires an ect node to be present: empty on gs101 and gs201,
   # with the location of the ECT blob on zuma
@@ -91,10 +95,10 @@ properties:
   soc_compatible:
     type: object
     description:
-      Bootloaders that match on this node rather than /soc_id (zuma's, and
-      the Pixel 7a's) pick the base DTB by matching the SoC's product id,
-      revision and package against these children, one per supported
-      silicon revision and package.
+      Bootloaders that use this node pick the base DTB by matching the
+      SoC's product id, revision and package against these children, one
+      per supported silicon revision and package. The factory device trees
+      for Malibu also use this node.
     additionalProperties:
       type: object
       # Stock trees also give each child a human-readable label in a
@@ -115,10 +119,18 @@ properties:
         - minor
         - pkg_mode
 
-required:
-  - ect
-
 allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: google,malibu
+    then:
+      required:
+        - soc_compatible
+    else:
+      required:
+        - ect
   - if:
       properties:
         compatible:

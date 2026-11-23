@@ -8,6 +8,15 @@ menuconfig MAILBOX
 
 if MAILBOX
 
+config GOOGLE_MALIBU_MBA
+	bool "Google Tensor G6 MBA v3 firmware mailbox queue"
+	depends on ARM64 && OF
+	help
+	  Support the four-word MBA v3 queued mailbox on Google Tensor
+	  G6 (Malibu). It exposes one Linux channel per hardware queue
+	  and serializes frame submission using hardware TX completion.
+	  Firmware request and reply correlation belongs to the client.
+
 config ARM_MHU
 	tristate "ARM MHU Mailbox"
 	depends on ARM_AMBA

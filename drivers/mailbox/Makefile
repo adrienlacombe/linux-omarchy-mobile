@@ -16,6 +16,7 @@ obj-$(CONFIG_AST2700_MBOX)	+= ast2700-mailbox.o
 obj-$(CONFIG_CV1800_MBOX)	+= cv1800-mailbox.o
 
 obj-$(CONFIG_EXYNOS_MBOX)	+= exynos-mailbox.o
+obj-$(CONFIG_GOOGLE_MALIBU_MBA)	+= google-malibu-mba.o
 
 obj-$(CONFIG_IMX_MBOX)	+= imx-mailbox.o
 

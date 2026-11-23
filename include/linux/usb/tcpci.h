@@ -192,7 +192,13 @@ struct tcpci;
  * @set_roles:
  *		Optional; Called after the TCPC has been told the power and data
  *		roles, e.g. on attach (@attached true), so that chip level
- *		drivers can set up vendor specific data paths.
+ *		drivers can set up vendor specific data paths. A negative
+ *		return value reports a path setup error.
+ * @resample_sink_after_reset:
+ *		Optional; Resample CC and VBUS when a fixed sink exits port reset.
+ * @skip_pd:
+ *		Optional; Disable PD receive, transmit and fast-role-swap for a
+ *		port whose firmware describes USB Type-C without USB PD.
  * @check_contaminant:
  *		Optional; The callback is invoked when chiplevel drivers indicated
  *		that the USB port needs to be checked for contaminant presence.
@@ -220,6 +226,8 @@ struct tcpci_data {
 	unsigned char vbus_vsafe0v:1;
 	unsigned char cable_comm_capable:1;
 	unsigned char set_orientation:1;
+	unsigned char skip_pd:1;
+	unsigned char resample_sink_after_reset:1;
 
 	int (*init)(struct tcpci *tcpci, struct tcpci_data *data);
 	int (*set_vconn)(struct tcpci *tcpci, struct tcpci_data *data,
@@ -230,8 +238,8 @@ struct tcpci_data {
 	void (*frs_sourcing_vbus)(struct tcpci *tcpci, struct tcpci_data *data);
 	void (*set_partner_usb_comm_capable)(struct tcpci *tcpci, struct tcpci_data *data,
 					     bool capable);
-	void (*set_roles)(struct tcpci *tcpci, struct tcpci_data *data, bool attached,
-			  enum typec_role role, enum typec_data_role data_role);
+	int (*set_roles)(struct tcpci *tcpci, struct tcpci_data *data, bool attached,
+			 enum typec_role role, enum typec_data_role data_role);
 	void (*check_contaminant)(struct tcpci *tcpci, struct tcpci_data *data);
 	bool (*attempt_vconn_swap_discovery)(struct tcpci *tcpci, struct tcpci_data *data);
 };

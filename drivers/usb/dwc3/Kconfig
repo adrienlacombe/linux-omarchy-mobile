@@ -234,4 +234,17 @@ config USB_DWC3_GOOGLE
 	  To compile this driver as a module, choose M here: the
 	  module will be called dwc3-google.ko.
 
+config USB_DWC3_GOOGLE_MALIBU
+	tristate "Google Malibu DWC3 USB2 wrapper"
+	depends on OF && COMMON_CLK && PM_GENERIC_DOMAINS
+	depends on USB_DWC3_GADGET || USB_DWC3_DUAL_ROLE
+	depends on IOMMU_DMA
+	depends on RESET_CONTROLLER
+	depends on USB_ROLE_SWITCH && I2C
+	help
+	  Support a USB2 peripheral on the Google Tensor G6 (Malibu)
+	  DesignWare DWC3 controller using the Google wrapper. The wrapper
+	  enables the controller and USB2 PHY APB clocks and resets before
+	  probing the generic DWC3 peripheral controller.
+
 endif
