@@ -2506,7 +2506,7 @@ int ufshcd_copy_query_response(struct ufs_hba *hba, struct ufshcd_lrb *lrbp)
  *
  * Return: 0 on success, negative on error.
  */
-static inline int ufshcd_hba_capabilities(struct ufs_hba *hba)
+static inline int ufshcd_hba_capabilities(struct ufs_hba *hba, bool link_only)
 {
 	int err;
 
@@ -2523,10 +2523,12 @@ static inline int ufshcd_hba_capabilities(struct ufs_hba *hba)
 		hba->nortt = FIELD_GET(MASK_NUMBER_OUTSTANDING_RTT, hba->capabilities) + 1;
 
 	/* Read crypto capabilities */
-	err = ufshcd_hba_init_crypto_capabilities(hba);
-	if (err) {
-		dev_err(hba->dev, "crypto setup failed\n");
-		return err;
+	if (!link_only) {
+		err = ufshcd_hba_init_crypto_capabilities(hba);
+		if (err) {
+			dev_err(hba->dev, "crypto setup failed\n");
+			return err;
+		}
 	}
 
 	/*
@@ -5324,10 +5326,11 @@ static int ufshcd_validate_link_params(struct ufs_hba *hba)
 /**
  * ufshcd_link_startup - Initialize unipro link startup
  * @hba: per adapter instance
+ * @enable_queues: Make the host controller operational for command transfer
  *
  * Return: 0 for success, non-zero in case of failure.
  */
-static int ufshcd_link_startup(struct ufs_hba *hba)
+static int ufshcd_link_startup(struct ufs_hba *hba, bool enable_queues)
 {
 	int ret;
 	int retries = DME_LINKSTARTUP_RETRIES;
@@ -5411,7 +5414,8 @@ link_startup:
 
 	/* Clear UECPA once due to LINERESET has happened during LINK_STARTUP */
 	ufshcd_readl(hba, REG_UIC_ERROR_CODE_PHY_ADAPTER_LAYER);
-	ret = ufshcd_make_hba_operational(hba);
+	if (enable_queues)
+		ret = ufshcd_make_hba_operational(hba);
 out:
 	if (ret)
 		dev_err(hba->dev, "link startup failed %d\n", ret);
@@ -9474,7 +9478,7 @@ static int ufshcd_device_init(struct ufs_hba *hba, bool init_dev_params)
 
 	hba->ufshcd_state = UFSHCD_STATE_RESET;
 
-	ret = ufshcd_link_startup(hba);
+	ret = ufshcd_link_startup(hba, true);
 	if (ret)
 		return ret;
 
@@ -10009,7 +10013,7 @@ static int ufshcd_variant_hba_init(struct ufs_hba *hba)
 	return err;
 }
 
-static int ufshcd_hba_init(struct ufs_hba *hba)
+static int ufshcd_hba_init(struct ufs_hba *hba, bool link_only)
 {
 	int err;
 
@@ -10051,8 +10055,10 @@ static int ufshcd_hba_init(struct ufs_hba *hba)
 	if (err)
 		goto out_disable_vreg;
 
-	ufs_debugfs_hba_init(hba);
-	ufs_fault_inject_hba_init(hba);
+	if (!link_only) {
+		ufs_debugfs_hba_init(hba);
+		ufs_fault_inject_hba_init(hba);
+	}
 
 	hba->is_powered = true;
 	goto out;
@@ -11217,14 +11223,16 @@ static void ufshcd_abort_init(struct ufs_hba *hba)
 }
 
 /**
- * ufshcd_init - Driver initialization routine
+ * ufshcd_init_common - Driver initialization routine
  * @hba: per-adapter instance
  * @mmio_base: base register address
  * @irq: Interrupt line of device
+ * @link_only: Test the UIC link and release the HBA without registering storage
  *
  * Return: 0 on success; < 0 on failure.
  */
-int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
+static int ufshcd_init_common(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq,
+			      bool link_only)
 {
 	int err;
 	struct Scsi_Host *host = hba->host;
@@ -11279,12 +11287,12 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 	 */
 	hba->vcc_off_delay_us = 2000;
 
-	err = ufshcd_hba_init(hba);
+	err = ufshcd_hba_init(hba, link_only);
 	if (err)
 		goto out_error;
 
 	/* Read capabilities registers */
-	err = ufshcd_hba_capabilities(hba);
+	err = ufshcd_hba_capabilities(hba, link_only);
 	if (err)
 		goto out_disable;
 
@@ -11300,15 +11308,14 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 		goto out_disable;
 	}
 
-	/* Allocate memory for host memory space */
-	err = ufshcd_memory_alloc(hba);
-	if (err) {
-		dev_err(hba->dev, "Memory allocation failed\n");
-		goto out_disable;
+	if (!link_only) {
+		err = ufshcd_memory_alloc(hba);
+		if (err) {
+			dev_err(hba->dev, "Memory allocation failed\n");
+			goto out_disable;
+		}
+		ufshcd_host_memory_configure(hba);
 	}
-
-	/* Configure LRB */
-	ufshcd_host_memory_configure(hba);
 
 	host->can_queue = hba->nutrs - UFSHCD_NUM_RESERVED;
 	/*
@@ -11384,9 +11391,10 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 	}
 
 	/* Reset the attached device */
-	ufshcd_device_reset(hba);
-
-	ufshcd_init_crypto(hba);
+	if (!link_only) {
+		ufshcd_device_reset(hba);
+		ufshcd_init_crypto(hba);
+	}
 
 	/* Host controller enable */
 	err = ufshcd_hba_enable(hba);
@@ -11394,6 +11402,13 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 		dev_err(hba->dev, "Host controller enable failed\n");
 		ufshcd_print_evt_hist(hba);
 		ufshcd_print_host_state(hba);
+		goto out_abort_init;
+	}
+
+	if (link_only) {
+		ufshcd_set_ufs_dev_active(hba);
+		hba->ufshcd_state = UFSHCD_STATE_RESET;
+		err = ufshcd_link_startup(hba, false);
 		goto out_abort_init;
 	}
 
@@ -11426,7 +11441,7 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 
 	hba->ufshcd_state = UFSHCD_STATE_RESET;
 
-	err = ufshcd_link_startup(hba);
+	err = ufshcd_link_startup(hba, true);
 	if (err)
 		goto out_abort_init;
 
@@ -11488,7 +11503,27 @@ out_disable:
 out_error:
 	return err > 0 ? -EIO : err;
 }
+
+int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
+{
+	return ufshcd_init_common(hba, mmio_base, irq, false);
+}
 EXPORT_SYMBOL_GPL(ufshcd_init);
+
+/**
+ * ufshcd_probe_link - Run a synchronous UIC link test
+ * @hba: Allocated host with powered suppliers
+ * @mmio_base: HCI register base
+ * @irq: HCI interrupt
+ *
+ * Release the controller and its IRQ before returning. No transfer queues
+ * or SCSI host are started. The caller owns the platform resource lifetime.
+ */
+int ufshcd_probe_link(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
+{
+	return ufshcd_init_common(hba, mmio_base, irq, true);
+}
+EXPORT_SYMBOL_GPL(ufshcd_probe_link);
 
 void ufshcd_resume_complete(struct device *dev)
 {
