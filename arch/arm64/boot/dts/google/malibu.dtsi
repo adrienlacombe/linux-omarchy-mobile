@@ -352,3 +352,4 @@
 };
 
 #include "malibu-usb2.dtsi"
+#include "malibu-ufs.dtsi"

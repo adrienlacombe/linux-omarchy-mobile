@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+
+/ {
+	hsios_ufs_sgia: interrupt-controller@3c272040 {
+		compatible = "google,malibu-level-sgia";
+		reg = <0x0 0x3c272040 0x0 0x20>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		#address-cells = <0>;
+		interrupts = <GIC_SPI 0x17a IRQ_TYPE_LEVEL_HIGH 0>;
+		status = "disabled";
+	};
+
+	/* Keep the host path and ufs0 alias available for ABL PHY fixups. */
+	ufs: ufs@3c2d0000 {
+		compatible = "google,malibu-ufshc";
+		reg = <0x0 0x3c2d0000 0x0 0x3000>,
+		      <0x0 0x3c2e0000 0x0 0x718>,
+		      <0x0 0x3c2f0000 0x0 0x4>,
+		      <0x0 0x3c340000 0x0 0xa000>,
+		      <0x0 0x3c34a000 0x0 0x18>,
+		      <0x0 0x3c00b108 0x0 0x4>,
+		      <0x0 0x3c00c210 0x0 0x4>,
+		      <0x0 0x3c00d108 0x0 0x4>;
+		reg-names = "hci", "top", "sec", "phy-sram", "subsystem",
+			    "psm-hsios", "psm-hci", "psm-phy";
+		interrupts-extended =
+			<&hsios_ufs_sgia 0x1a>,
+			<&gic GIC_SPI 0x168 IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x169 IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x16a IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x16b IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x16c IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x16d IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x16e IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x16f IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x170 IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x171 IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x172 IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x173 IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x174 IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x175 IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x176 IRQ_TYPE_LEVEL_HIGH 0>,
+			<&gic GIC_SPI 0x177 IRQ_TYPE_LEVEL_HIGH 0>;
+		interrupt-names = "hci", "mcq0", "mcq1", "mcq2", "mcq3",
+				  "mcq4", "mcq5", "mcq6", "mcq7", "mcq8",
+				  "mcq9", "mcq10", "mcq11", "mcq12", "mcq13",
+				  "mcq14", "mcq15";
+		iommus = <&amb_smmu 0x8000>;
+		dma-coherent;
+		status = "disabled";
+	};
+};

@@ -9,7 +9,7 @@
 
 	aliases {
 		serial0 = &{/uart@3bdd6000};
-		ufs0 = &{/ufs@3c2d0000};
+		ufs0 = &ufs;
 	};
 
 	chosen {
@@ -41,12 +41,6 @@
 	/* Allow the bootloader to set the console UART status via serial0. */
 	uart@3bdd6000 {
 		reg = <0x0 0x3bdd6000 0x0 0x100>;
-		status = "disabled";
-	};
-
-	/* The bootloader can attach PHY calibration to the UFS host node. */
-	ufs@3c2d0000 {
-		reg = <0x0 0x3c2d0000 0x0 0x3000>;
 		status = "disabled";
 	};
 };
