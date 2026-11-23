@@ -185,6 +185,14 @@ static inline int ufshcd_vops_link_startup_notify(struct ufs_hba *hba,
 	return 0;
 }
 
+static inline int ufshcd_vops_prepare_link_startup(struct ufs_hba *hba)
+{
+	if (hba->vops && hba->vops->prepare_link_startup)
+		return hba->vops->prepare_link_startup(hba);
+
+	return 0;
+}
+
 static inline int ufshcd_vops_negotiate_pwr_mode(struct ufs_hba *hba,
 						 const struct ufs_pa_layer_attr *dev_max_params,
 						 struct ufs_pa_layer_attr *dev_req_params)

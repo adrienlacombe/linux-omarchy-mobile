@@ -385,6 +385,8 @@ struct ufshcd_tx_eq_params {
  *                     variant specific Uni-Pro initialization.
  * @link_startup_notify: called before and after Link startup is carried out
  *                       to allow variant specific Uni-Pro initialization.
+ * @prepare_link_startup: called before each link startup command. An error
+ *                        aborts the current link startup without issuing it.
  * @negotiate_pwr_mode: called to negotiate power mode.
  * @pwr_change_notify: called before and after a power mode change
  *			is carried out to allow vendor spesific capabilities
@@ -435,6 +437,7 @@ struct ufs_hba_variant_ops {
 				     enum ufs_notify_change_status);
 	int	(*link_startup_notify)(struct ufs_hba *,
 				       enum ufs_notify_change_status);
+	int	(*prepare_link_startup)(struct ufs_hba *hba);
 	int	(*negotiate_pwr_mode)(struct ufs_hba *hba,
 				      const struct ufs_pa_layer_attr *desired_pwr_mode,
 				      struct ufs_pa_layer_attr *final_params);
