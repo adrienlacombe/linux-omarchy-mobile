@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
 
+#include <dt-bindings/clock/google,malibu-cpm-io.h>
+
 / {
 	hsios_ufs_sgia: interrupt-controller@3c272040 {
 		compatible = "google,malibu-level-sgia";
@@ -48,6 +50,16 @@
 				  "mcq14", "mcq15";
 		iommus = <&amb_smmu 0x8000>;
 		dma-coherent;
+		clocks = <&cpm MALIBU_CPM_CLK_UFS_GPIO_REF>,
+			 <&cpm MALIBU_CPM_CLK_UFS_MPHY_REF>,
+			 <&cpm MALIBU_CPM_CLK_UFS_CORE>,
+			 <&cpm MALIBU_CPM_CLK_UFS_DEEP_H8>;
+		clock-names = "gpio-ref", "mphy-ref", "core", "deep-h8";
+		resets = <&cpm MALIBU_CPM_RST_UFS_PHY>;
+		reset-names = "phy";
+		power-domains = <&cpm MALIBU_CPM_PD_UFS_PREP>,
+				<&cpm MALIBU_CPM_PD_UFS>;
+		power-domain-names = "prep", "core";
 		status = "disabled";
 	};
 };
