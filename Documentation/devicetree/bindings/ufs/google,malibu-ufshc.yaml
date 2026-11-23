@@ -101,6 +101,18 @@ properties:
       - const: prep
       - const: core
 
+  vdd0p75-supply:
+    description: 0.75 V HSIO analog supply.
+
+  vdd1p2-supply:
+    description: 1.2 V HSIO analog supply.
+
+  vcc-supply:
+    description: 2.5 V UFS device supply.
+
+  vccq-supply:
+    description: 1.2 V UFS device I/O supply.
+
   phy-cal-data:
     $ref: /schemas/types.yaml#/definitions/uint32-array
     minItems: 74
@@ -141,5 +153,9 @@ required:
   - reset-names
   - power-domains
   - power-domain-names
+  - vdd0p75-supply
+  - vdd1p2-supply
+  - vcc-supply
+  - vccq-supply
 
 additionalProperties: false

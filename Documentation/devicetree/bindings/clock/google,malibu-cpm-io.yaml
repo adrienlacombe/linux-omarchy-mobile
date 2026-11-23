@@ -108,6 +108,41 @@ properties:
       - buck-12s
       - ldo-12s
 
+  ufs-regulators:
+    type: object
+    description: DA9189 UFS analog and GPIO-switched device rails.
+    additionalProperties: false
+    properties:
+      ldo-1s:
+        $ref: '#/$defs/ufs-rail'
+        description: 0.75 V HSIO analog supply.
+      ldo-24s:
+        $ref: '#/$defs/ufs-rail'
+        description: 1.2 V HSIO analog supply.
+      buck-11s:
+        $ref: '#/$defs/ufs-rail'
+        description: 2.5 V device VCC supply.
+      buck-13s:
+        $ref: '#/$defs/ufs-rail'
+        description: 1.2 V device VCCQ supply.
+    required:
+      - ldo-1s
+      - ldo-24s
+      - buck-11s
+      - buck-13s
+
+$defs:
+  ufs-rail:
+    $ref: /schemas/regulator/regulator.yaml#
+    unevaluatedProperties: false
+    properties:
+      regulator-boot-on: false
+      regulator-always-on: false
+    required:
+      - regulator-name
+      - regulator-min-microvolt
+      - regulator-max-microvolt
+
 required:
   - compatible
   - mboxes
