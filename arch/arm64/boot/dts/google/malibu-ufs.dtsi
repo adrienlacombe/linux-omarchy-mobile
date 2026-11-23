@@ -60,6 +60,40 @@
 		power-domains = <&cpm MALIBU_CPM_PD_UFS_PREP>,
 				<&cpm MALIBU_CPM_PD_UFS>;
 		power-domain-names = "prep", "core";
+		vdd0p75-supply = <&ufs_ldo_1s>;
+		vdd1p2-supply = <&ufs_ldo_24s>;
+		vcc-supply = <&ufs_buck_11s>;
+		vccq-supply = <&ufs_buck_13s>;
 		status = "disabled";
+	};
+};
+
+&cpm {
+	ufs-regulators {
+		status = "disabled";
+
+		ufs_ldo_1s: ldo-1s {
+			regulator-name = "ldo_1s";
+			regulator-min-microvolt = <750000>;
+			regulator-max-microvolt = <750000>;
+		};
+
+		ufs_ldo_24s: ldo-24s {
+			regulator-name = "ldo_24s";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+		};
+
+		ufs_buck_11s: buck-11s {
+			regulator-name = "buck_11s";
+			regulator-min-microvolt = <2500000>;
+			regulator-max-microvolt = <2500000>;
+		};
+
+		ufs_buck_13s: buck-13s {
+			regulator-name = "buck_13s";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+		};
 	};
 };
