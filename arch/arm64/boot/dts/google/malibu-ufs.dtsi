@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
 
 #include <dt-bindings/clock/google,malibu-cpm-io.h>
+#include <dt-bindings/gpio/gpio.h>
 
 / {
 	hsios_ufs_sgia: interrupt-controller@3c272040 {
@@ -11,6 +12,44 @@
 		#address-cells = <0>;
 		interrupts = <GIC_SPI 0x17a IRQ_TYPE_LEVEL_HIGH 0>;
 		status = "disabled";
+	};
+
+	hsios_ufs_gpio: pinctrl@3c280000 {
+		compatible = "google,malibu-hsios-ufs-pinctrl";
+		reg = <0x0 0x3c280000 0x0 0xd000>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		gpio-ranges = <&hsios_ufs_gpio 0 0 13>;
+		power-domains = <&cpm MALIBU_CPM_PD_HSIOS>;
+		power-domain-names = "csr";
+		status = "disabled";
+
+		ufs_gpio_pins: ufs-gpio-pins {
+			pins = "XHSIOS_UFS_RESETB", "XHSIOS_UFS_PWR_EN",
+			       "XHSIOS_UFS_LSS";
+			function = "hsios_gpio";
+			bias-disable;
+		};
+	};
+
+	hsios_ufs_stby: pinctrl@3c2a0000 {
+		compatible = "google,malibu-hsios-ufs-stby-pinctrl";
+		reg = <0x0 0x3c2a0000 0x0 0x2000>;
+		status = "disabled";
+
+		ufs_refclk_on: ufs-refclk-on-pins {
+			pins = "XHSIOS_UFS_REFCLK";
+			function = "hsios_stby_ufs";
+			google,drive-strength-code = <1>;
+			bias-disable;
+		};
+
+		ufs_refclk_off: ufs-refclk-off-pins {
+			pins = "XHSIOS_UFS_REFCLK";
+			function = "hsios_stby_ufs";
+			google,drive-strength-code = <0>;
+			bias-pull-down;
+		};
 	};
 
 	/* Keep the host path and ufs0 alias available for ABL PHY fixups. */
@@ -60,6 +99,14 @@
 		power-domains = <&cpm MALIBU_CPM_PD_UFS_PREP>,
 				<&cpm MALIBU_CPM_PD_UFS>;
 		power-domain-names = "prep", "core";
+		reset-gpios = <&hsios_ufs_gpio 0 GPIO_ACTIVE_LOW>;
+		power-gpios = <&hsios_ufs_gpio 8 GPIO_ACTIVE_HIGH>;
+		lss-gpios = <&hsios_ufs_gpio 11 GPIO_ACTIVE_HIGH>;
+		/* Select these explicitly when starting the device sequence. */
+		pinctrl-names = "gpio-prepare", "refclk-on", "refclk-off";
+		pinctrl-0 = <&ufs_gpio_pins>;
+		pinctrl-1 = <&ufs_refclk_on>;
+		pinctrl-2 = <&ufs_refclk_off>;
 		vdd0p75-supply = <&ufs_ldo_1s>;
 		vdd1p2-supply = <&ufs_ldo_24s>;
 		vcc-supply = <&ufs_buck_11s>;
