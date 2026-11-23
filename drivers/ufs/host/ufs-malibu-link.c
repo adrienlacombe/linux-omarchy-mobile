@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/dma-mapping.h>
 #include <linux/io.h>
 
 #include <ufs/ufshcd.h>
@@ -20,7 +21,16 @@ static int ufs_malibu_prepare_link_startup(struct ufs_hba *hba)
 	return ufs_malibu_phy_init(hba, &ufs->phy);
 }
 
+static int ufs_malibu_set_dma_mask(struct ufs_hba *hba)
+{
+	if (!(hba->capabilities & MASK_64_ADDRESSING_SUPPORT))
+		return -EOPNOTSUPP;
+
+	return dma_set_mask_and_coherent(hba->dev, DMA_BIT_MASK(MALIBU_UFS_DMA_BITS));
+}
+
 const struct ufs_hba_variant_ops ufs_malibu_vops = {
 	.name = "malibu",
+	.set_dma_mask = ufs_malibu_set_dma_mask,
 	.prepare_link_startup = ufs_malibu_prepare_link_startup,
 };

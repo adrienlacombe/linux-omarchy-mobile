@@ -131,7 +131,20 @@ static void malibu_top_update(struct ufs_malibu_phy *phy, u32 reg, u32 mask, u32
 	writel((readl(phy->top + reg) & ~mask) | val, phy->top + reg);
 }
 
-/* The preparation domain must be powered and the core still off. */
+static int malibu_check_inherited_phy(struct ufs_malibu_phy *phy)
+{
+	u32 rext = readl(phy->top + MALIBU_UFS_TOP_REXT);
+	u32 mode = readl(phy->top + MALIBU_UFS_TOP_LSS_MODE);
+
+	if (!(readl(phy->top + MALIBU_UFS_TOP_STATUS) & MALIBU_UFS_TOP_POWER_READY) ||
+	    (rext & (MALIBU_UFS_REXT_TRIM | MALIBU_UFS_REXT_OVERRIDE)) !=
+	    (MALIBU_UFS_REXT_OVERRIDE | phy->rext) || mode != phy->hs_lss)
+		return -EIO;
+
+	return 0;
+}
+
+/* The preparation domain must be powered; preserve a configured inherited PHY. */
 int ufs_malibu_phy_prepare(struct ufs_malibu_phy *phy)
 {
 	u32 status;
@@ -140,10 +153,13 @@ int ufs_malibu_phy_prepare(struct ufs_malibu_phy *phy)
 	phy->initialized = false;
 	phy->power_ready = false;
 	ret = readl_poll_timeout(phy->psm, status,
-				 (status & MALIBU_UFS_PSM_STATE) == MALIBU_UFS_PSM_OFF,
+				 (status & MALIBU_UFS_PSM_STATE) == MALIBU_UFS_PSM_OFF ||
+				 (status & MALIBU_UFS_PSM_STATE) == MALIBU_UFS_PSM_ON,
 				 10, 10000);
 	if (ret)
 		return ret;
+	if ((status & MALIBU_UFS_PSM_STATE) == MALIBU_UFS_PSM_ON)
+		return malibu_check_inherited_phy(phy);
 
 	malibu_top_update(phy, MALIBU_UFS_TOP_CTRL, MALIBU_UFS_TOP_NO_PATCH_MASK,
 			  MALIBU_UFS_TOP_NO_PATCH_MASK);
@@ -156,25 +172,37 @@ int ufs_malibu_phy_prepare(struct ufs_malibu_phy *phy)
 	return 0;
 }
 
-/* The caller holds the core power domain; zero selects the pre-discovery delay. */
-int ufs_malibu_phy_post_power_on(struct ufs_malibu_phy *phy, u32 refclk_wait_us)
+int ufs_malibu_phy_wait_power(struct ufs_malibu_phy *phy)
 {
 	u32 status;
 	int ret;
 
-	phy->power_ready = false;
 	ret = readl_poll_timeout(phy->psm, status,
 				 (status & MALIBU_UFS_PSM_STATE) == MALIBU_UFS_PSM_ON,
 				 10, 10000);
 	if (ret)
 		return ret;
 
-	ret = readl_poll_timeout(phy->top + MALIBU_UFS_TOP_STATUS, status,
-				 status & MALIBU_UFS_TOP_POWER_READY, 10, 400);
+	return readl_poll_timeout(phy->top + MALIBU_UFS_TOP_STATUS, status,
+				  status & MALIBU_UFS_TOP_POWER_READY, 10, 400);
+}
+
+/* The caller holds the core power domain; zero selects the pre-discovery delay. */
+int ufs_malibu_phy_post_power_on(struct ufs_malibu_phy *phy, u32 refclk_wait_us)
+{
+	u32 status;
+	int ret;
+
+	ret = ufs_malibu_phy_wait_power(phy);
 	if (ret)
 		return ret;
 
 	status = readl(phy->subsystem + MALIBU_UFS_SS_REFCLK_CTRL);
+	if (!phy->power_ready) {
+		phy->saved_refclk_ctrl = status;
+		phy->saved_refclk_delay = readl(phy->subsystem + MALIBU_UFS_SS_REFCLK_DELAY);
+		phy->saved_refclk_aux = readl(phy->subsystem + MALIBU_UFS_SS_REFCLK_AUX_DELAY);
+	}
 	writel(status | MALIBU_UFS_SS_REFCLK_ENABLE, phy->subsystem + MALIBU_UFS_SS_REFCLK_CTRL);
 	writel(0, phy->subsystem + MALIBU_UFS_SS_REFCLK_AUX_DELAY);
 	writel(refclk_wait_us ?: MALIBU_UFS_REFCLK_WAIT_US,
@@ -183,6 +211,19 @@ int ufs_malibu_phy_post_power_on(struct ufs_malibu_phy *phy, u32 refclk_wait_us)
 	phy->power_ready = true;
 
 	return 0;
+}
+
+/* Called with the controller stopped and the core domain still powered. */
+void ufs_malibu_phy_restore_refclk(struct ufs_malibu_phy *phy)
+{
+	if (!phy->power_ready)
+		return;
+	phy->power_ready = false;
+
+	writel(phy->saved_refclk_delay, phy->subsystem + MALIBU_UFS_SS_REFCLK_DELAY);
+	writel(phy->saved_refclk_aux, phy->subsystem + MALIBU_UFS_SS_REFCLK_AUX_DELAY);
+	writel(phy->saved_refclk_ctrl, phy->subsystem + MALIBU_UFS_SS_REFCLK_CTRL);
+	readl(phy->subsystem + MALIBU_UFS_SS_REFCLK_CTRL);
 }
 
 static int malibu_apply_calibration(struct ufs_hba *hba, struct ufs_malibu_phy *phy)

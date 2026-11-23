@@ -11,6 +11,8 @@ struct pinctrl_state;
 struct regulator;
 struct ufs_hba_variant_ops;
 
+#define MALIBU_UFS_DMA_BITS 36
+
 enum malibu_device_stage {
 	MALIBU_DEVICE_OFF,
 	MALIBU_DEVICE_PINS,

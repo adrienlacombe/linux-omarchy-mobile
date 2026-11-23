@@ -39,15 +39,16 @@ config SCSI_UFSHCD_PLATFORM
 	  If unsure, say N.
 
 config SCSI_UFS_MALIBU
-	tristate "Google Malibu UFS PHY support (bring-up)"
+	tristate "Google Malibu UFS link diagnostic"
 	depends on SCSI_UFSHCD_PLATFORM && COMMON_CLK_GOOGLE_MALIBU_CPM
 	depends on GPIOLIB && PINCTRL
+	depends on ARM_SMMU_V3 && IOMMU_DMA
 	help
 	  Build the Google Tensor G6 Malibu UFS bring-up code.
 	  The code sets up the device supplies and GPIOs, checks
 	  bootloader calibration data and programs the local UniPro
-	  attributes before link startup. Platform host registration
-	  is a separate step.
+	  attributes before a synchronous link test. The diagnostic releases
+	  the controller without registering a SCSI host or storage.
 
 	  If unsure, say N.
 
