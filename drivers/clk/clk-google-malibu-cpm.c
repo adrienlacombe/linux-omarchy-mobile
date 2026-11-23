@@ -8,12 +8,14 @@
 #include <linux/errno.h>
 #include <linux/jiffies.h>
 #include <linux/mailbox_client.h>
+#include <linux/malibu-cpm.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/regulator/driver.h>
+#include <linux/regulator/machine.h>
 #include <linux/reset-controller.h>
 #include <linux/spinlock.h>
 #include <linux/unaligned.h>
@@ -237,7 +239,54 @@ static int malibu_cpm_request(struct malibu_cpm *cpm, u8 destination, const u32 
 #define MALIBU_CPM_RAIL_GET_ENABLED	1
 #define MALIBU_CPM_RAIL_SET_ENABLED	2
 #define MALIBU_CPM_RAIL_GET_SELECTOR	3
+#define MALIBU_CPM_RAIL_SET_SELECTOR	4
 #define MALIBU_CPM_LDO_19M		0x1f
+#define MALIBU_CPM_BUCK_11S		0x33
+#define MALIBU_CPM_BUCK_13S		0x35
+#define MALIBU_CPM_LDO_1S		0x37
+#define MALIBU_CPM_LDO_24S		0x4e
+
+#define MALIBU_CPM_PMIC_WRITE		0x00020000
+#define MALIBU_CPM_UFS_VCC_CONTROL	0x1857
+#define MALIBU_CPM_UFS_VCCQ_CONTROL	0x1867
+#define MALIBU_CPM_DA9189_SID		0x0e
+
+static struct platform_driver malibu_cpm_driver;
+
+static int malibu_cpm_write_ufs_enable(struct malibu_cpm *cpm, u16 reg)
+{
+	const u32 payload[] = { MALIBU_CPM_PMIC_WRITE | reg, MALIBU_CPM_DA9189_SID, 0 };
+	u32 reply[3];
+	int ret;
+
+	ret = malibu_cpm_request(cpm, MALIBU_CPM_REGULATOR_DESTINATION, payload,
+				 MALIBU_CPM_REGULATOR_TIMEOUT_MS, 0, reply);
+	if (ret)
+		return ret;
+
+	return reply[0] & MALIBU_CPM_REGULATOR_STATUS ? -EPIPE : 0;
+}
+
+/* Apply the stock UFS enable decouple settings to both device rails. */
+int malibu_cpm_ufs_decouple_enable(struct device *supplier)
+{
+	struct malibu_cpm *cpm;
+	int ret;
+
+	guard(device)(supplier);
+	if (supplier->driver != &malibu_cpm_driver.driver)
+		return -EPROBE_DEFER;
+
+	cpm = dev_get_drvdata(supplier);
+	if (!cpm)
+		return -EPROBE_DEFER;
+	ret = malibu_cpm_write_ufs_enable(cpm, MALIBU_CPM_UFS_VCC_CONTROL);
+	if (ret)
+		return ret;
+
+	return malibu_cpm_write_ufs_enable(cpm, MALIBU_CPM_UFS_VCCQ_CONTROL);
+}
+EXPORT_SYMBOL_GPL(malibu_cpm_ufs_decouple_enable);
 
 struct malibu_cpm_usb2_rail {
 	struct regulator_desc desc;
@@ -245,11 +294,11 @@ struct malibu_cpm_usb2_rail {
 	bool must_be_on;
 };
 
-static int malibu_cpm_usb2_rail_request(struct malibu_cpm *cpm, unsigned int id,
-					unsigned int op, bool enable, u32 *value)
+static int malibu_cpm_rail_request(struct malibu_cpm *cpm, unsigned int id,
+				  unsigned int op, u32 argument, u32 *value)
 {
 	const u32 payload[] = {
-		MALIBU_CPM_REGULATOR_REQUEST | (op << 16) | id, enable, 0,
+		MALIBU_CPM_REGULATOR_REQUEST | (op << 16) | id, argument, 0,
 	};
 	u32 reply[3];
 	int ret;
@@ -267,13 +316,12 @@ static int malibu_cpm_usb2_rail_request(struct malibu_cpm *cpm, unsigned int id,
 	return 0;
 }
 
-static int malibu_cpm_usb2_rail_state(struct malibu_cpm *cpm, unsigned int id)
+static int malibu_cpm_rail_state(struct malibu_cpm *cpm, unsigned int id)
 {
 	u32 value;
 	int ret;
 
-	ret = malibu_cpm_usb2_rail_request(cpm, id, MALIBU_CPM_RAIL_GET_ENABLED, false,
-					   &value);
+	ret = malibu_cpm_rail_request(cpm, id, MALIBU_CPM_RAIL_GET_ENABLED, 0, &value);
 	if (ret)
 		return ret;
 
@@ -283,9 +331,9 @@ static int malibu_cpm_usb2_rail_state(struct malibu_cpm *cpm, unsigned int id)
 	return value;
 }
 
-static int malibu_cpm_usb2_rail_is_enabled(struct regulator_dev *rdev)
+static int malibu_cpm_rail_is_enabled(struct regulator_dev *rdev)
 {
-	return malibu_cpm_usb2_rail_state(rdev_get_drvdata(rdev), rdev_get_id(rdev));
+	return malibu_cpm_rail_state(rdev_get_drvdata(rdev), rdev_get_id(rdev));
 }
 
 static int malibu_cpm_usb2_rail_set_enabled(struct regulator_dev *rdev, bool enable)
@@ -295,8 +343,8 @@ static int malibu_cpm_usb2_rail_set_enabled(struct regulator_dev *rdev, bool ena
 	if (id != MALIBU_CPM_LDO_19M)
 		return -EOPNOTSUPP;
 
-	return malibu_cpm_usb2_rail_request(rdev_get_drvdata(rdev), id,
-					  MALIBU_CPM_RAIL_SET_ENABLED, enable, NULL);
+	return malibu_cpm_rail_request(rdev_get_drvdata(rdev), id,
+				       MALIBU_CPM_RAIL_SET_ENABLED, enable, NULL);
 }
 
 static int malibu_cpm_usb2_rail_enable(struct regulator_dev *rdev)
@@ -312,11 +360,11 @@ static int malibu_cpm_usb2_rail_disable(struct regulator_dev *rdev)
 static const struct regulator_ops malibu_cpm_usb2_switchable_ops = {
 	.enable = malibu_cpm_usb2_rail_enable,
 	.disable = malibu_cpm_usb2_rail_disable,
-	.is_enabled = malibu_cpm_usb2_rail_is_enabled,
+	.is_enabled = malibu_cpm_rail_is_enabled,
 };
 
 static const struct regulator_ops malibu_cpm_usb2_observe_ops = {
-	.is_enabled = malibu_cpm_usb2_rail_is_enabled,
+	.is_enabled = malibu_cpm_rail_is_enabled,
 };
 
 static const struct malibu_cpm_usb2_rail malibu_cpm_usb2_rails[] = {
@@ -370,14 +418,14 @@ static int malibu_cpm_verify_usb2_rail(struct malibu_cpm *cpm,
 	u32 selector;
 	int ret;
 
-	ret = malibu_cpm_usb2_rail_request(cpm, rail->desc.id, MALIBU_CPM_RAIL_GET_SELECTOR,
-					   false, &selector);
+	ret = malibu_cpm_rail_request(cpm, rail->desc.id, MALIBU_CPM_RAIL_GET_SELECTOR, 0,
+				      &selector);
 	if (ret)
 		return ret;
 	if (selector != rail->voltage_selector)
 		return -ERANGE;
 
-	ret = malibu_cpm_usb2_rail_state(cpm, rail->desc.id);
+	ret = malibu_cpm_rail_state(cpm, rail->desc.id);
 	if (ret < 0)
 		return ret;
 	if (!ret && rail->must_be_on)
@@ -430,6 +478,124 @@ static int malibu_cpm_register_usb2_rails(struct malibu_cpm *cpm)
 		}
 	}
 
+	devres_remove_group(cpm->dev, group);
+	return 0;
+}
+
+static int malibu_cpm_ufs_get_voltage_sel(struct regulator_dev *rdev)
+{
+	u32 selector;
+	int ret;
+
+	ret = malibu_cpm_rail_request(rdev_get_drvdata(rdev), rdev_get_id(rdev),
+				      MALIBU_CPM_RAIL_GET_SELECTOR, 0, &selector);
+	if (ret)
+		return ret;
+	if (selector > U8_MAX)
+		return -EPROTO;
+
+	return selector;
+}
+
+static int malibu_cpm_ufs_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector)
+{
+	int id = rdev_get_id(rdev);
+
+	/* The device GPIO switches the rails. Only their D1 voltages are writable. */
+	switch (id) {
+	case MALIBU_CPM_BUCK_11S:
+		if (selector != 170)
+			return -EINVAL;
+		break;
+	case MALIBU_CPM_BUCK_13S:
+		if (selector != 192)
+			return -EINVAL;
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	return malibu_cpm_rail_request(rdev_get_drvdata(rdev), id,
+				       MALIBU_CPM_RAIL_SET_SELECTOR, selector, NULL);
+}
+
+static const struct regulator_ops malibu_cpm_ufs_analog_ops = {
+	.is_enabled = malibu_cpm_rail_is_enabled,
+	.list_voltage = regulator_list_voltage_linear,
+	.get_voltage_sel = malibu_cpm_ufs_get_voltage_sel,
+};
+
+static const struct regulator_ops malibu_cpm_ufs_buck_ops = {
+	.is_enabled = malibu_cpm_rail_is_enabled,
+	.list_voltage = regulator_list_voltage_linear,
+	.get_voltage_sel = malibu_cpm_ufs_get_voltage_sel,
+	.set_voltage_sel = malibu_cpm_ufs_set_voltage_sel,
+};
+
+static int malibu_cpm_ufs_rail_init(struct regulator_dev *rdev, struct regulator_config *config)
+{
+	/* Apply the board voltage only when the host asks for it. */
+	rdev->constraints->apply_uV = false;
+	if (rdev->desc->ops->set_voltage_sel)
+		rdev->constraints->valid_ops_mask |= REGULATOR_CHANGE_VOLTAGE;
+
+	return 0;
+}
+
+#define MALIBU_UFS_RAIL(_name, _match, _id, _min, _step, _type) {		\
+	.name = (_name),							\
+	.of_match = (_match),						\
+	.regulators_node = "ufs-regulators",				\
+	.id = (_id),							\
+	.min_uV = (_min),							\
+	.uV_step = (_step),						\
+	.n_voltages = 256,						\
+	.init_cb = malibu_cpm_ufs_rail_init,				\
+	.type = REGULATOR_VOLTAGE,					\
+	.owner = THIS_MODULE,						\
+	.ops = &malibu_cpm_ufs_ ## _type ## _ops,				\
+}
+
+static const struct regulator_desc malibu_cpm_ufs_rails[] = {
+	MALIBU_UFS_RAIL("ldo_1s", "ldo-1s", MALIBU_CPM_LDO_1S, 400000, 5000, analog),
+	MALIBU_UFS_RAIL("ldo_24s", "ldo-24s", MALIBU_CPM_LDO_24S, 400000, 5000, analog),
+	MALIBU_UFS_RAIL("buck_11s", "buck-11s", MALIBU_CPM_BUCK_11S, 800000, 10000, buck),
+	MALIBU_UFS_RAIL("buck_13s", "buck-13s", MALIBU_CPM_BUCK_13S, 240000, 5000, buck),
+};
+
+static int malibu_cpm_register_ufs_rails(struct malibu_cpm *cpm)
+{
+	const struct regulator_config config = {
+		.dev = cpm->dev,
+		.driver_data = cpm,
+	};
+	struct device_node *regulators __free(device_node) =
+		of_get_child_by_name(cpm->dev->of_node, "ufs-regulators");
+	struct regulator_dev *rdev;
+	void *group;
+	unsigned int i;
+
+	if (!regulators || !of_device_is_available(regulators))
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(malibu_cpm_ufs_rails); i++) {
+		struct device_node *node __free(device_node) =
+			of_get_child_by_name(regulators, malibu_cpm_ufs_rails[i].of_match);
+
+		if (!node || !of_device_is_available(node))
+			return -EINVAL;
+	}
+
+	group = devres_open_group(cpm->dev, NULL, GFP_KERNEL);
+	if (!group)
+		return -ENOMEM;
+	for (i = 0; i < ARRAY_SIZE(malibu_cpm_ufs_rails); i++) {
+		rdev = devm_regulator_register(cpm->dev, &malibu_cpm_ufs_rails[i], &config);
+		if (IS_ERR(rdev)) {
+			devres_release_group(cpm->dev, group);
+			return PTR_ERR(rdev);
+		}
+	}
 	devres_remove_group(cpm->dev, group);
 	return 0;
 }
@@ -1020,6 +1186,10 @@ static int malibu_cpm_probe(struct platform_device *pdev)
 	ret = malibu_cpm_register_usb2_rails(cpm);
 	if (ret)
 		dev_warn(dev, "USB2 regulator service unavailable: %pe\n", ERR_PTR(ret));
+	ret = malibu_cpm_register_ufs_rails(cpm);
+	if (ret)
+		dev_warn(dev, "UFS regulator service unavailable: %pe\n", ERR_PTR(ret));
+	platform_set_drvdata(pdev, cpm);
 	return 0;
 }
 
