@@ -132,6 +132,7 @@ int ufs_malibu_phy_prepare(struct ufs_malibu_phy *phy)
 	u32 status;
 	int ret;
 
+	phy->initialized = false;
 	ret = readl_poll_timeout(phy->psm, status,
 				 (status & MALIBU_UFS_PSM_STATE) == MALIBU_UFS_PSM_OFF,
 				 10, 10000);
@@ -214,6 +215,9 @@ int ufs_malibu_phy_init(struct ufs_hba *hba, struct ufs_malibu_phy *phy)
 	u32 status;
 	int ret, reset_ret;
 
+	if (phy->initialized)
+		return 0;
+
 	ret = malibu_set_attrs(hba, tx_eq, ARRAY_SIZE(tx_eq));
 	if (ret)
 		return ret;
@@ -241,8 +245,10 @@ int ufs_malibu_phy_init(struct ufs_hba *hba, struct ufs_malibu_phy *phy)
 		goto assert_reset;
 	ret = readl_poll_timeout(phy->subsystem + MALIBU_UFS_SS_PHY_STATUS, status,
 				 !(status & MALIBU_UFS_SS_PHY_BUSY), 1000, 1000000);
-	if (!ret)
+	if (!ret) {
+		phy->initialized = true;
 		return 0;
+	}
 
 assert_reset:
 	reset_ret = reset_control_assert(phy->reset);

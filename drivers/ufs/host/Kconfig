@@ -40,12 +40,14 @@ config SCSI_UFSHCD_PLATFORM
 
 config SCSI_UFS_MALIBU
 	tristate "Google Malibu UFS PHY support (bring-up)"
-	depends on SCSI_UFSHCD_PLATFORM && OF && RESET_CONTROLLER
+	depends on SCSI_UFSHCD_PLATFORM && COMMON_CLK_GOOGLE_MALIBU_CPM
+	depends on GPIOLIB && PINCTRL
 	help
-	  Build the Google Tensor G6 Malibu PHY initialization code.
-	  The code checks bootloader calibration data, prepares the PHY
-	  power sequence and programs the local UniPro attributes before
-	  link startup. Platform host registration is a separate step.
+	  Build the Google Tensor G6 Malibu UFS bring-up code.
+	  The code sets up the device supplies and GPIOs, checks
+	  bootloader calibration data and programs the local UniPro
+	  attributes before link startup. Platform host registration
+	  is a separate step.
 
 	  If unsure, say N.
 

@@ -17,6 +17,7 @@ struct ufs_malibu_phy {
 	u32 rext;
 	bool hs_lss;
 	bool pmc_workaround;
+	bool initialized;
 };
 
 int ufs_malibu_phy_read_config(struct device *dev, struct ufs_malibu_phy *phy);
