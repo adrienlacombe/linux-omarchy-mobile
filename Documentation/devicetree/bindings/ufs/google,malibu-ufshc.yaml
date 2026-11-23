@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/ufs/google,malibu-ufshc.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Tensor G6 Malibu UFS host controller
+
+maintainers:
+  - Peter Griffin <peter.griffin@linaro.org>
+
+description: |
+  Malibu integrates a UFS HCI, a PHY with a dedicated SRAM window, and
+  separate interrupt routing for the host and multiple completion queues.
+
+properties:
+  compatible:
+    const: google,malibu-ufshc
+
+  reg:
+    items:
+      - description: Host controller registers
+      - description: UFS top registers
+      - description: UFS security control registers
+      - description: PHY SRAM
+      - description: UFS subsystem registers
+      - description: HSIO-S power sequencer status
+      - description: Host controller power sequencer status
+      - description: PHY power sequencer status
+
+  reg-names:
+    items:
+      - const: hci
+      - const: top
+      - const: sec
+      - const: phy-sram
+      - const: subsystem
+      - const: psm-hsios
+      - const: psm-hci
+      - const: psm-phy
+
+  interrupts-extended:
+    minItems: 17
+    maxItems: 17
+    description: |
+      The host interrupt through the HSIO-S interrupt aggregator, followed
+      by 16 direct GIC interrupts for the multiple completion queues.
+
+  interrupt-names:
+    items:
+      - const: hci
+      - const: mcq0
+      - const: mcq1
+      - const: mcq2
+      - const: mcq3
+      - const: mcq4
+      - const: mcq5
+      - const: mcq6
+      - const: mcq7
+      - const: mcq8
+      - const: mcq9
+      - const: mcq10
+      - const: mcq11
+      - const: mcq12
+      - const: mcq13
+      - const: mcq14
+      - const: mcq15
+
+  iommus:
+    maxItems: 1
+
+  dma-coherent: true
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts-extended
+  - interrupt-names
+  - iommus
+  - dma-coherent
+
+additionalProperties: false

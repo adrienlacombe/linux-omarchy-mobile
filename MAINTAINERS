@@ -11191,6 +11191,7 @@ F:	Documentation/devicetree/bindings/soc/google/google,gs101-dtzpc.yaml
 F:	Documentation/devicetree/bindings/soc/google/google,gs101-pmu.yaml
 F:	Documentation/devicetree/bindings/soc/google/google,gs101-pmu-intr-gen.yaml
 F:	Documentation/devicetree/bindings/spmi/google,malibu-smartdv-spmi.yaml
+F:	Documentation/devicetree/bindings/ufs/google,malibu-ufshc.yaml
 F:	Documentation/devicetree/bindings/usb/google,lga-dwc3.yaml
 F:	Documentation/devicetree/bindings/usb/google,malibu-dwc3.yaml
 F:	Documentation/devicetree/bindings/usb/maxim,max77779-tcpc-spmi.yaml
