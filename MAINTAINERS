@@ -11200,6 +11200,7 @@ F:	Documentation/devicetree/bindings/watchdog/google,malibu-wdt.yaml
 F:	arch/arm64/boot/dts/exynos/google/
 F:	arch/arm64/boot/dts/google/
 F:	drivers/clk/clk-google-malibu-cpm.c
+F:	drivers/ufs/host/ufs-malibu*
 F:	drivers/clk/samsung/clk-gs101.c
 F:	drivers/clk/samsung/clk-gs201.c
 F:	drivers/clk/samsung/clk-zuma.c

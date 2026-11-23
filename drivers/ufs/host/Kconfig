@@ -38,6 +38,17 @@ config SCSI_UFSHCD_PLATFORM
 
 	  If unsure, say N.
 
+config SCSI_UFS_MALIBU
+	tristate "Google Malibu UFS PHY support (bring-up)"
+	depends on SCSI_UFSHCD_PLATFORM && OF && RESET_CONTROLLER
+	help
+	  Build the Google Tensor G6 Malibu PHY initialization code.
+	  The code checks bootloader calibration data, prepares the PHY
+	  power sequence and programs the local UniPro attributes before
+	  link startup. Platform host registration is a separate step.
+
+	  If unsure, say N.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM
