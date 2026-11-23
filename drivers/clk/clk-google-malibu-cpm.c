@@ -36,6 +36,7 @@
 #define MALIBU_CPM_RESET_SERVICE	4
 #define MALIBU_CPM_LPCM_DESTINATION	8
 #define MALIBU_CPM_HSION_DOMAIN		7
+#define MALIBU_CPM_HSIOS_DOMAIN		8
 #define MALIBU_CPM_LSIOE_DOMAIN		5
 #define MALIBU_CPM_CLOCK_TIMEOUT_MS	1000
 #define MALIBU_CPM_RESET_TIMEOUT_MS	3000
@@ -52,7 +53,7 @@
 #define MALIBU_MBFS_READ			0x70000000
 #define MALIBU_MBFS_WRITE		0x80000000
 #define MALIBU_MBFS_NAME_SIZE		16
-#define MALIBU_MBFS_DOMAIN_COUNT	(MALIBU_CPM_PD_LSIOE_CLI + 1)
+#define MALIBU_MBFS_DOMAIN_COUNT	(MALIBU_CPM_PD_UFS + 1)
 #define MALIBU_MBFS_NO_PARENT		-1
 
 struct malibu_cpm {
@@ -73,6 +74,7 @@ struct malibu_cpm {
 	u32 frame[4];
 	u32 response[3];
 	u32 transition_id;
+	u32 mbfs_root;
 	int tx_result;
 	u8 sequence;
 	u8 token;
@@ -103,6 +105,7 @@ static const struct {
 	[MALIBU_CPM_RST_USB_DRD_BUS] = { MALIBU_CPM_HSION_DOMAIN, 6 },
 	[MALIBU_CPM_RST_USB_TOP] = { MALIBU_CPM_HSION_DOMAIN, 7 },
 	[MALIBU_CPM_RST_I2C3] = { MALIBU_CPM_LSIOE_DOMAIN, 0x23 },
+	[MALIBU_CPM_RST_UFS_PHY] = { MALIBU_CPM_HSIOS_DOMAIN, 0 },
 };
 
 struct malibu_cpm_domain {
@@ -111,6 +114,8 @@ struct malibu_cpm_domain {
 	struct malibu_cpm_domain *parent;
 	u32 id;
 	u32 handle;
+	bool lazy;
+	bool powered_here;
 };
 
 struct malibu_cpm_domains {
@@ -518,6 +523,22 @@ static const struct clk_ops malibu_cpm_clock_ops = {
 	.recalc_rate = malibu_cpm_clock_rate,
 };
 
+static unsigned long malibu_cpm_ufs_mphy_rate(struct clk_hw *hw, unsigned long parent_rate)
+{
+	return 38400000;
+}
+
+static const struct clk_ops malibu_cpm_ufs_clock_ops = {
+	.prepare = malibu_cpm_clock_prepare,
+	.unprepare = malibu_cpm_clock_unprepare,
+};
+
+static const struct clk_ops malibu_cpm_ufs_mphy_ops = {
+	.prepare = malibu_cpm_clock_prepare,
+	.unprepare = malibu_cpm_clock_unprepare,
+	.recalc_rate = malibu_cpm_ufs_mphy_rate,
+};
+
 static bool malibu_cpm_reset_valid(unsigned long id)
 {
 	return id < ARRAY_SIZE(malibu_cpm_resets) && malibu_cpm_resets[id].domain;
@@ -696,12 +717,40 @@ static int malibu_mbfs_set_domain(struct malibu_cpm_domain *domain, bool on)
 
 static int malibu_mbfs_power_on(struct generic_pm_domain *genpd)
 {
-	return malibu_mbfs_set_domain(container_of(genpd, struct malibu_cpm_domain, genpd), true);
+	struct malibu_cpm_domain *domain = container_of(genpd, struct malibu_cpm_domain, genpd);
+	bool on;
+	int ret;
+
+	if (!domain->lazy)
+		return malibu_mbfs_set_domain(domain, true);
+
+	/* Leave domains inherited from the bootloader in their original state. */
+	ret = malibu_mbfs_lookup(domain->cpm, domain->cpm->mbfs_root, genpd->name,
+				 &domain->handle);
+	if (ret)
+		return ret;
+	ret = malibu_mbfs_read_domain(domain, &on);
+	if (ret || on)
+		return ret;
+
+	ret = malibu_mbfs_set_domain(domain, true);
+	if (!ret)
+		domain->powered_here = true;
+	return ret;
 }
 
 static int malibu_mbfs_power_off(struct generic_pm_domain *genpd)
 {
-	return malibu_mbfs_set_domain(container_of(genpd, struct malibu_cpm_domain, genpd), false);
+	struct malibu_cpm_domain *domain = container_of(genpd, struct malibu_cpm_domain, genpd);
+	int ret;
+
+	if (domain->lazy && !domain->powered_here)
+		return 0;
+
+	ret = malibu_mbfs_set_domain(domain, false);
+	if (!ret)
+		domain->powered_here = false;
+	return ret;
 }
 
 static void malibu_cpm_remove_domain(void *data)
@@ -733,18 +782,27 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 		u32 id;
 		int parent;
 		bool active_wakeup;
+		bool lazy;
 	} domains[] = {
 		[MALIBU_CPM_PD_HSION] = { "hsio_n.v", 0x19, MALIBU_MBFS_NO_PARENT },
 		[MALIBU_CPM_PD_USB_TOP] = { "HsioNUsb.v", 0x210, MALIBU_CPM_PD_HSION, true },
 		[MALIBU_CPM_PD_USB_PSW] = { "HsioNUsbPsw.v", 0x211, MALIBU_CPM_PD_USB_TOP, true },
 		[MALIBU_CPM_PD_LSIOE] = { "lsio_e.v", 0x1d, MALIBU_MBFS_NO_PARENT },
 		[MALIBU_CPM_PD_LSIOE_CLI] = { "LsioECli.v", 0x230, MALIBU_CPM_PD_LSIOE },
+		[MALIBU_CPM_PD_HSIOS] = {
+			"hsio_s.v", 0x1a, MALIBU_MBFS_NO_PARENT, .lazy = true,
+		},
+		[MALIBU_CPM_PD_UFS_PREP] = {
+			"HsioSUfsPrep.v", 0x222, MALIBU_CPM_PD_HSIOS, .lazy = true,
+		},
+		[MALIBU_CPM_PD_UFS] = {
+			"HsioSUfs.v", 0x220, MALIBU_CPM_PD_UFS_PREP, .lazy = true,
+		},
 	};
 	struct device *dev = cpm->dev;
 	struct malibu_cpm_domains *provider;
 	bool initially_on[MALIBU_MBFS_DOMAIN_COUNT];
 	unsigned int i;
-	u32 root;
 	int ret;
 
 	static_assert(ARRAY_SIZE(domains) == MALIBU_MBFS_DOMAIN_COUNT);
@@ -755,7 +813,7 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 	if (!provider)
 		return -ENOMEM;
 
-	ret = malibu_mbfs_root(cpm, &root);
+	ret = malibu_mbfs_root(cpm, &cpm->mbfs_root);
 	if (ret)
 		return ret;
 	for (i = 0; i < ARRAY_SIZE(domains); i++) {
@@ -764,12 +822,18 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 
 		domain->cpm = cpm;
 		domain->id = domains[i].id;
-		ret = malibu_mbfs_lookup(cpm, root, domains[i].name, &domain->handle);
-		if (ret)
-			return ret;
-		ret = malibu_mbfs_read_domain(domain, &initially_on[i]);
-		if (ret)
-			return ret;
+		domain->lazy = domains[i].lazy;
+		/* Optional domains perform their first lookup at power-on. */
+		initially_on[i] = false;
+		if (!domain->lazy) {
+			ret = malibu_mbfs_lookup(cpm, cpm->mbfs_root, domains[i].name,
+						 &domain->handle);
+			if (ret)
+				return ret;
+			ret = malibu_mbfs_read_domain(domain, &initially_on[i]);
+			if (ret)
+				return ret;
+		}
 		if (parent != MALIBU_MBFS_NO_PARENT && initially_on[i] && !initially_on[parent])
 			return -EPROTO;
 
@@ -813,6 +877,7 @@ static int malibu_cpm_register_clocks(struct malibu_cpm *cpm)
 		const char *name;
 		u8 domain;
 		u8 resource;
+		const struct clk_ops *ops;
 	} gates[] = {
 		[MALIBU_CPM_CLK_USBC_STICKY] = { "malibu-usbc-sticky", MALIBU_CPM_HSION_DOMAIN, 0 },
 		[MALIBU_CPM_CLK_USBC_NON_STICKY] = {
@@ -822,6 +887,19 @@ static int malibu_cpm_register_clocks(struct malibu_cpm *cpm)
 		[MALIBU_CPM_CLK_USB2_APB] = { "malibu-usb2-apb", MALIBU_CPM_HSION_DOMAIN, 7 },
 		[MALIBU_CPM_CLK_I2C3] = { "malibu-i2c3", MALIBU_CPM_LSIOE_DOMAIN, 0x6 },
 		[MALIBU_CPM_CLK_I2C3_APB] = { "malibu-i2c3-apb", MALIBU_CPM_LSIOE_DOMAIN, 0x14 },
+		[MALIBU_CPM_CLK_UFS_GPIO_REF] = {
+			"malibu-ufs-gpio-ref", MALIBU_CPM_HSIOS_DOMAIN, 0,
+			&malibu_cpm_ufs_clock_ops,
+		},
+		[MALIBU_CPM_CLK_UFS_MPHY_REF] = {
+			"malibu-ufs-mphy-ref", MALIBU_CPM_HSIOS_DOMAIN, 1, &malibu_cpm_ufs_mphy_ops,
+		},
+		[MALIBU_CPM_CLK_UFS_CORE] = {
+			"malibu-ufs-core", MALIBU_CPM_HSIOS_DOMAIN, 3, &malibu_cpm_ufs_clock_ops,
+		},
+		[MALIBU_CPM_CLK_UFS_DEEP_H8] = {
+			"malibu-ufs-deep-h8", MALIBU_CPM_HSIOS_DOMAIN, 4, &malibu_cpm_ufs_clock_ops,
+		},
 	};
 	struct clk_hw_onecell_data *clocks;
 	unsigned int id;
@@ -835,8 +913,8 @@ static int malibu_cpm_register_clocks(struct malibu_cpm *cpm)
 	for (id = 0; id < ARRAY_SIZE(gates); id++) {
 		struct clk_init_data init = {
 			.name = gates[id].name,
-			.ops = &malibu_cpm_clock_ops,
-			.flags = CLK_GET_RATE_NOCACHE,
+			.ops = gates[id].ops ?: &malibu_cpm_clock_ops,
+			.flags = gates[id].ops ? 0 : CLK_GET_RATE_NOCACHE,
 		};
 		struct malibu_cpm_clock *clock;
 		int ret;
