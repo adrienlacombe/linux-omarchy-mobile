@@ -71,6 +71,62 @@ properties:
 
   dma-coherent: true
 
+  clocks:
+    items:
+      - description: UFS device reference clock gate
+      - description: 38.4 MHz M-PHY reference clock gate
+      - description: UFS controller core clock gate
+      - description: Deep Hibern8 clock gate
+
+  clock-names:
+    items:
+      - const: gpio-ref
+      - const: mphy-ref
+      - const: core
+      - const: deep-h8
+
+  resets:
+    maxItems: 1
+
+  reset-names:
+    const: phy
+
+  power-domains:
+    items:
+      - description: UFS preparation domain
+      - description: UFS core domain
+
+  power-domain-names:
+    items:
+      - const: prep
+      - const: core
+
+  phy-cal-data:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    minItems: 74
+    maxItems: 74
+    description: |
+      Per-device M-PHY calibration cells supplied by the bootloader. Each
+      cell packs the register address in the low 16 bits and its value in
+      the high 16 bits. The cells must be applied in their supplied order.
+
+  google,rext-val:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    maximum: 63
+    description: Six-bit PHY resistor trim supplied by the bootloader.
+
+  google,enable-hs-lss:
+    type: boolean
+    description: Enable the high-speed link startup sequence for calibrated boards.
+
+  google,mphy-pmc-war:
+    type: boolean
+    description: Apply the M-PHY power mode change workaround.
+
+  google,enable-phy-patching:
+    type: boolean
+    description: Load a firmware patch into M-PHY SRAM.
+
 required:
   - compatible
   - reg
@@ -79,5 +135,11 @@ required:
   - interrupt-names
   - iommus
   - dma-coherent
+  - clocks
+  - clock-names
+  - resets
+  - reset-names
+  - power-domains
+  - power-domain-names
 
 additionalProperties: false
