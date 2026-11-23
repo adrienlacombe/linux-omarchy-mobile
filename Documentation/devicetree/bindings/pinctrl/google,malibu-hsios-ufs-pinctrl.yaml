@@ -1,0 +1,140 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/pinctrl/google,malibu-hsios-ufs-pinctrl.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Tensor G6 Malibu HSIO-S UFS pad control
+
+maintainers:
+  - Peter Griffin <peter.griffin@linaro.org>
+
+description: |
+  The HSIO-S controller provides the three UFS device output pads at GPIO
+  indices 0 (RESETB), 8 (power enable) and 11 (link startup selection).
+  Its register interface is supplied by the HSIO-S CSR power domain.
+  The HSIO-S standby controller supplies UFS reference clock pad control
+  at pad index 0.
+
+allOf:
+  - $ref: pinctrl.yaml#
+  - if:
+      properties:
+        compatible:
+          const: google,malibu-hsios-ufs-pinctrl
+    then:
+      properties:
+        ufs-refclk-on-pins: false
+        ufs-refclk-off-pins: false
+      required:
+        - gpio-controller
+        - "#gpio-cells"
+        - gpio-ranges
+        - power-domains
+        - power-domain-names
+        - ufs-gpio-pins
+    else:
+      properties:
+        gpio-controller: false
+        "#gpio-cells": false
+        gpio-ranges: false
+        power-domains: false
+        power-domain-names: false
+        ufs-gpio-pins: false
+      required:
+        - ufs-refclk-on-pins
+        - ufs-refclk-off-pins
+
+properties:
+  compatible:
+    enum:
+      - google,malibu-hsios-ufs-pinctrl
+      - google,malibu-hsios-ufs-stby-pinctrl
+
+  reg:
+    maxItems: 1
+
+  gpio-controller: true
+
+  "#gpio-cells":
+    const: 2
+
+  gpio-ranges:
+    maxItems: 1
+
+  power-domains:
+    maxItems: 1
+
+  power-domain-names:
+    const: csr
+
+  ufs-gpio-pins:
+    type: object
+    allOf:
+      - $ref: pinmux-node.yaml#
+      - $ref: pincfg-node.yaml#
+    properties:
+      pins:
+        minItems: 1
+        maxItems: 3
+        items:
+          enum:
+            - XHSIOS_UFS_RESETB
+            - XHSIOS_UFS_PWR_EN
+            - XHSIOS_UFS_LSS
+      function:
+        const: hsios_gpio
+      bias-disable: true
+    required:
+      - pins
+      - function
+      - bias-disable
+    additionalProperties: false
+
+  ufs-refclk-on-pins:
+    $ref: "#/$defs/refclk-state"
+    properties:
+      google,drive-strength-code:
+        const: 1
+      bias-pull-down: false
+    required:
+      - bias-disable
+
+  ufs-refclk-off-pins:
+    $ref: "#/$defs/refclk-state"
+    properties:
+      google,drive-strength-code:
+        const: 0
+      bias-disable: false
+    required:
+      - bias-pull-down
+
+required:
+  - compatible
+  - reg
+
+unevaluatedProperties: false
+
+$defs:
+  refclk-state:
+    type: object
+    allOf:
+      - $ref: pinmux-node.yaml#
+      - $ref: pincfg-node.yaml#
+    properties:
+      pins:
+        const: XHSIOS_UFS_REFCLK
+      function:
+        const: hsios_stby_ufs
+      bias-disable: true
+      bias-pull-down:
+        type: boolean
+      google,drive-strength-code:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        enum: [0, 1]
+        description: Malibu pad drive register encoding for the reference clock.
+    required:
+      - pins
+      - function
+      - google,drive-strength-code
+    additionalProperties: false

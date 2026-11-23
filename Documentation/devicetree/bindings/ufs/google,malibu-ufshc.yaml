@@ -101,6 +101,33 @@ properties:
       - const: prep
       - const: core
 
+  reset-gpios:
+    maxItems: 1
+    description: Active-low UFS device reset.
+
+  power-gpios:
+    maxItems: 1
+    description: Active-high enable signal to the UFS device supply.
+
+  lss-gpios:
+    maxItems: 1
+    description: Active-high selection of the high-speed link startup sequence.
+
+  pinctrl-names:
+    items:
+      - const: gpio-prepare
+      - const: refclk-on
+      - const: refclk-off
+
+  pinctrl-0:
+    description: GPIO mux and bias configuration before driving the output values.
+
+  pinctrl-1:
+    description: UFS reference clock pad configuration for the enabled clock.
+
+  pinctrl-2:
+    description: UFS reference clock pad configuration for the disabled clock.
+
   vdd0p75-supply:
     description: 0.75 V HSIO analog supply.
 
@@ -153,6 +180,13 @@ required:
   - reset-names
   - power-domains
   - power-domain-names
+  - reset-gpios
+  - power-gpios
+  - lss-gpios
+  - pinctrl-names
+  - pinctrl-0
+  - pinctrl-1
+  - pinctrl-2
   - vdd0p75-supply
   - vdd1p2-supply
   - vcc-supply
