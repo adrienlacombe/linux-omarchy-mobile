@@ -11,6 +11,7 @@
 		#interrupt-cells = <1>;
 		#address-cells = <0>;
 		interrupts = <GIC_SPI 0x17a IRQ_TYPE_LEVEL_HIGH 0>;
+		power-domains = <&cpm MALIBU_CPM_PD_HSIOS>;
 		status = "disabled";
 	};
 
