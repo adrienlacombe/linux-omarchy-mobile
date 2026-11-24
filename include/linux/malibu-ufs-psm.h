@@ -9,6 +9,9 @@
 
 #define MALIBU_HSIOS_PSM_STATE	0x1f
 #define MALIBU_HSIOS_PSM_ON	0x10
+#define MALIBU_HSIOS_PSM_ADDR	0x3c00b108
+#define MALIBU_UFS_HC_PSM_ADDR	0x3c00c210
+#define MALIBU_UFS_PHY_PSM_ADDR	0x3c00d108
 
 struct malibu_ufs_psm_regs {
 	void __iomem *hsios;
@@ -49,16 +52,16 @@ static inline bool malibu_ufs_map_psms(struct device *dev, struct malibu_ufs_psm
 	ufs = of_find_node_by_path("ufs0");
 	if (ufs && of_device_is_available(ufs) &&
 	    of_device_is_compatible(ufs, "google,malibu-ufshc")) {
-		regs->hsios = malibu_ufs_map_psm(dev, ufs, "psm-hsios", 0x3c00b108);
-		regs->hc = malibu_ufs_map_psm(dev, ufs, "psm-hci", 0x3c00c210);
-		regs->phy = malibu_ufs_map_psm(dev, ufs, "psm-phy", 0x3c00d108);
+		regs->hsios = malibu_ufs_map_psm(dev, ufs, "psm-hsios", MALIBU_HSIOS_PSM_ADDR);
+		regs->hc = malibu_ufs_map_psm(dev, ufs, "psm-hci", MALIBU_UFS_HC_PSM_ADDR);
+		regs->phy = malibu_ufs_map_psm(dev, ufs, "psm-phy", MALIBU_UFS_PHY_PSM_ADDR);
 	}
 	of_node_put(ufs);
 
 	if (regs->hsios && regs->hc && regs->phy)
 		return true;
 
-	dev_info(dev, "ufs-uic-v29 early PSM resources unavailable\n");
+	dev_info(dev, "ufs-uic-v30 early PSM resources unavailable\n");
 	return false;
 }
 
@@ -78,10 +81,10 @@ static inline void malibu_ufs_log_psms(struct device *dev, const char *phase,
 				       const struct malibu_ufs_psm_sample *sample)
 {
 	if (sample->children_valid)
-		dev_info(dev, "ufs-uic-v29 %s PSM HSIOS=0x%08x HC=0x%08x PHY=0x%08x\n",
+		dev_info(dev, "ufs-uic-v30 %s PSM HSIOS=0x%08x HC=0x%08x PHY=0x%08x\n",
 			 phase, sample->hsios, sample->hc, sample->phy);
 	else
-		dev_info(dev, "ufs-uic-v29 %s PSM HSIOS=0x%08x child PSMs skipped\n",
+		dev_info(dev, "ufs-uic-v30 %s PSM HSIOS=0x%08x child PSMs skipped\n",
 			 phase, sample->hsios);
 }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <dt-bindings/clock/google,malibu-cpm-io.h>
+#include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/dma-map-ops.h>
 #include <linux/dma-mapping.h>
@@ -10,6 +11,7 @@
 #include <linux/iommu-dma.h>
 #include <linux/irq.h>
 #include <linux/malibu-cpm.h>
+#include <linux/malibu-ufs-psm.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of_address.h>
@@ -33,6 +35,10 @@
 #define MALIBU_UFS_MCQ_SPI_BASE		0x168
 #define MALIBU_UFS_MCQ_IRQS		16
 #define MALIBU_GIC_SPI			0
+#define MALIBU_LPCM8_BASE		0x3c009000
+#define MALIBU_LPCM8_PSM_COUNT		GENMASK(13, 8)
+#define MALIBU_LPCM8_PSM1_DESC		0x18
+#define MALIBU_LPCM8_PSM_STATE		0xf
 
 static int ufs_malibu_check_dma(struct device *dev)
 {
@@ -264,6 +270,63 @@ struct malibu_ufs_setup_sample {
 	int ret;
 };
 
+struct malibu_ufs_vote_sample {
+	struct malibu_ufs_psm_sample ap;
+	u32 lpcm_header;
+	u32 lpcm_desc;
+	u32 lpcm_addr;
+	u32 lpcm_raw;
+	int lpcm_ret;
+};
+
+static void ufs_malibu_read_vote_psms(const struct malibu_ufs_psm_regs *regs,
+				     void __iomem *lpcm, struct malibu_ufs_vote_sample *sample)
+{
+	u32 desc;
+
+	*sample = (struct malibu_ufs_vote_sample) { .lpcm_ret = -ENXIO };
+	if (!regs->hsios)
+		return;
+
+	malibu_ufs_sample_psms(regs, &sample->ap);
+	if (!sample->ap.children_valid) {
+		sample->lpcm_ret = -EAGAIN;
+		return;
+	}
+	if (!lpcm)
+		return;
+
+	sample->lpcm_header = readl(lpcm);
+	if (sample->lpcm_header == U32_MAX ||
+	    FIELD_GET(MALIBU_LPCM8_PSM_COUNT, sample->lpcm_header) < 2) {
+		sample->lpcm_ret = -ENODATA;
+		return;
+	}
+
+	/* D1 ABL and CPM use the same LPCM status-address calculation. */
+	desc = readl(lpcm + MALIBU_LPCM8_PSM1_DESC);
+	sample->lpcm_desc = desc;
+	sample->lpcm_addr = MALIBU_LPCM8_BASE + ((desc & 0xf) << 12) +
+			    ((desc >> 12) & 0x1f0) + 0x64 * ((desc >> 4) & 0xf) + 0x20;
+
+	/* Reuse a sampled AP word. A different address has no verified Linux mapping. */
+	switch (sample->lpcm_addr) {
+	case MALIBU_HSIOS_PSM_ADDR:
+		sample->lpcm_raw = sample->ap.hsios;
+		break;
+	case MALIBU_UFS_HC_PSM_ADDR:
+		sample->lpcm_raw = sample->ap.hc;
+		break;
+	case MALIBU_UFS_PHY_PSM_ADDR:
+		sample->lpcm_raw = sample->ap.phy;
+		break;
+	default:
+		sample->lpcm_ret = -ERANGE;
+		return;
+	}
+	sample->lpcm_ret = 0;
+}
+
 static void ufs_malibu_read_psms(struct ufs_malibu *ufs,
 				 struct malibu_ufs_psm_status *status)
 {
@@ -287,9 +350,9 @@ static void ufs_malibu_log_setup_psms(struct device *dev,
 	for (unsigned int i = 0; i < count; i++) {
 		const struct malibu_ufs_setup_sample *sample = &samples[i];
 
-		dev_info(dev, "ufs-uic-v29 setup %s PSM before HC=0x%08x PHY=0x%08x\n",
+		dev_info(dev, "ufs-uic-v30 setup %s PSM before HC=0x%08x PHY=0x%08x\n",
 			 sample->phase, sample->before.hci, sample->before.phy);
-		dev_info(dev, "ufs-uic-v29 setup %s PSM after HC=0x%08x PHY=0x%08x ret=%d\n",
+		dev_info(dev, "ufs-uic-v30 setup %s PSM after HC=0x%08x PHY=0x%08x ret=%d\n",
 			 sample->phase, sample->after.hci, sample->after.phy, sample->ret);
 	}
 }
@@ -302,14 +365,32 @@ static bool ufs_malibu_psms_off(struct ufs_malibu *ufs,
 	       (status->phy & MALIBU_UFS_PSM_STATE) == MALIBU_UFS_PSM_OFF;
 }
 
-static void ufs_malibu_log_vote_psms(struct device *dev, const char *domain,
-				     const struct malibu_ufs_psm_status *before,
-				     const struct malibu_ufs_psm_status *after, int vote_ret)
+static void ufs_malibu_log_vote_psm(struct device *dev, const char *domain, const char *when,
+				   const struct malibu_ufs_vote_sample *sample, int vote_ret)
 {
-	dev_info(dev, "ufs-uic-v29 %s PSM before HC=0x%08x PHY=0x%08x\n",
-		 domain, before->hci, before->phy);
-	dev_info(dev, "ufs-uic-v29 %s PSM after HC=0x%08x PHY=0x%08x vote_ret=%d\n",
-		 domain, after->hci, after->phy, vote_ret);
+	if (!sample->ap.children_valid)
+		dev_info(dev,
+			 "ufs-uic-v30 %s PSM %s HSIOS=0x%08x child PSMs skipped ret=%d vote_ret=%d\n",
+			 domain, when, sample->ap.hsios, sample->lpcm_ret, vote_ret);
+	else if (sample->lpcm_ret)
+		dev_info(dev,
+			 "ufs-uic-v30 %s PSM %s HC=0x%08x PHY=0x%08x LPCM8 PSM1 skipped header=0x%08x desc=0x%08x addr=0x%08x ret=%d vote_ret=%d\n",
+			 domain, when, sample->ap.hc, sample->ap.phy, sample->lpcm_header,
+			 sample->lpcm_desc, sample->lpcm_addr, sample->lpcm_ret, vote_ret);
+	else
+		dev_info(dev,
+			 "ufs-uic-v30 %s PSM %s HC=0x%08x PHY=0x%08x LPCM8 PSM1 raw=0x%08x state=%#x desc=0x%08x addr=0x%08x vote_ret=%d\n",
+			 domain, when, sample->ap.hc, sample->ap.phy, sample->lpcm_raw,
+			 sample->lpcm_raw & MALIBU_LPCM8_PSM_STATE, sample->lpcm_desc,
+			 sample->lpcm_addr, vote_ret);
+}
+
+static void ufs_malibu_log_vote_psms(struct device *dev, const char *domain,
+				     const struct malibu_ufs_vote_sample *before,
+				     const struct malibu_ufs_vote_sample *after, int vote_ret)
+{
+	ufs_malibu_log_vote_psm(dev, domain, "before", before, vote_ret);
+	ufs_malibu_log_vote_psm(dev, domain, "after", after, vote_ret);
 }
 
 /* Called before the UFS core stops HCI or releases the IRQ. */
@@ -320,7 +401,7 @@ static void ufs_malibu_before_hci_stop(struct ufs_hba *hba, int link, int hibern
 	bool off;
 	int ret;
 
-	dev_info(hba->dev, "ufs-uic-v29 probe result before HCI stop: link=%d hibern8=%d\n",
+	dev_info(hba->dev, "ufs-uic-v30 probe result before HCI stop: link=%d hibern8=%d\n",
 		 link, hibern8);
 	if (link || hibern8)
 		return;
@@ -328,14 +409,14 @@ static void ufs_malibu_before_hci_stop(struct ufs_hba *hba, int link, int hibern
 	ret = read_poll_timeout(ufs_malibu_psms_off, off, off, 5, 10000, false,
 				ufs, &status);
 	ufs->deep_h8_release_result = ret;
-	dev_info(hba->dev, "ufs-uic-v29 Deep H8 gate: HC=%#x PHY=%#x ret=%d\n",
+	dev_info(hba->dev, "ufs-uic-v30 Deep H8 gate: HC=%#x PHY=%#x ret=%d\n",
 		 status.hci, status.phy, ret);
 	if (ret)
 		return;
 
 	/* Keep the core clock, domains and device powered for this LPCM request. */
 	clk_unprepare(ufs->deep_h8);
-	dev_info(hba->dev, "ufs-uic-v29 Deep H8 unprepare returned\n");
+	dev_info(hba->dev, "ufs-uic-v30 Deep H8 unprepare returned\n");
 }
 
 static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
@@ -352,10 +433,12 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	struct ufs_hba *hba;
 	struct ufs_malibu *ufs;
 	struct clk *mphy, *core_clk;
-	struct malibu_ufs_psm_status before_prep, after_prep;
-	struct malibu_ufs_psm_status before_core, after_core;
+	struct malibu_ufs_vote_sample before_prep, after_prep;
+	struct malibu_ufs_vote_sample before_core, after_core;
+	struct malibu_ufs_psm_regs vote_regs = {};
 	struct malibu_ufs_setup_sample setup[4];
 	unsigned int setup_count = 0;
+	void __iomem *lpcm = NULL;
 	void __iomem *hci;
 	const char *phase;
 	u32 status;
@@ -388,12 +471,19 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	ufs->phy.subsystem = ufs_malibu_map(pdev, "subsystem", 0x3c34a000, 0x18);
 	if (IS_ERR(ufs->phy.subsystem))
 		return PTR_ERR(ufs->phy.subsystem);
-	ufs->phy.psm = ufs_malibu_map(pdev, "psm-phy", 0x3c00d108, 4);
+	ufs->phy.psm = ufs_malibu_map(pdev, "psm-phy", MALIBU_UFS_PHY_PSM_ADDR, sizeof(u32));
 	if (IS_ERR(ufs->phy.psm))
 		return PTR_ERR(ufs->phy.psm);
-	ufs->psm_hci = ufs_malibu_map(pdev, "psm-hci", 0x3c00c210, 4);
+	ufs->psm_hci = ufs_malibu_map(pdev, "psm-hci", MALIBU_UFS_HC_PSM_ADDR, sizeof(u32));
 	if (IS_ERR(ufs->psm_hci))
 		return PTR_ERR(ufs->psm_hci);
+	if (of_machine_is_compatible("google,malibu-grizzly")) {
+		vote_regs.hsios = malibu_ufs_map_psm(dev, dev->of_node, "psm-hsios",
+						   MALIBU_HSIOS_PSM_ADDR);
+		vote_regs.hc = ufs->psm_hci;
+		vote_regs.phy = ufs->phy.psm;
+		lpcm = devm_ioremap(dev, MALIBU_LPCM8_BASE, MALIBU_LPCM8_PSM1_DESC + sizeof(u32));
+	}
 	ufs->phy.reset = devm_reset_control_get_exclusive(dev, "phy");
 	if (IS_ERR(ufs->phy.reset))
 		return PTR_ERR(ufs->phy.reset);
@@ -431,12 +521,12 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	ret = ufs_malibu_get_gpios(&ufs->device);
 	if (ret) {
 		ufs_malibu_finish_setup_sample(ufs, &setup[setup_count++], "gpio-setup", ret);
-		dev_info(dev, "ufs-uic-v29 early GPIO acquisition ret=%d\n", ret);
+		dev_info(dev, "ufs-uic-v30 early GPIO acquisition ret=%d\n", ret);
 		goto put_cpm;
 	}
 	ret = ufs_malibu_device_init_gpios(&ufs->device);
 	ufs_malibu_finish_setup_sample(ufs, &setup[setup_count++], "gpio-setup", ret);
-	dev_info(dev, "ufs-uic-v29 early GPIO output-low ret=%d\n", ret);
+	dev_info(dev, "ufs-uic-v30 early GPIO output-low ret=%d\n", ret);
 	if (ret)
 		goto put_cpm;
 
@@ -461,13 +551,13 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	ufs_malibu_read_psms(ufs, &setup[setup_count].before);
 	ret = malibu_cpm_ufs_decouple_enable(cpm);
 	ufs_malibu_finish_setup_sample(ufs, &setup[setup_count++], phase, ret);
-	dev_info(dev, "ufs-uic-v29 early PMIC decouple ret=%d\n", ret);
+	dev_info(dev, "ufs-uic-v30 early PMIC decouple ret=%d\n", ret);
 	if (ret)
 		goto hold;
 	phase = "prep-domain";
-	ufs_malibu_read_psms(ufs, &before_prep);
+	ufs_malibu_read_vote_psms(&vote_regs, lpcm, &before_prep);
 	prep_ret = pm_runtime_resume_and_get(prep);
-	ufs_malibu_read_psms(ufs, &after_prep);
+	ufs_malibu_read_vote_psms(&vote_regs, lpcm, &after_prep);
 	ret = prep_ret;
 	if (ret < 0)
 		goto log_prep_failure;
@@ -478,9 +568,9 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	if (ret)
 		goto log_prep_failure;
 	phase = "core-domain";
-	ufs_malibu_read_psms(ufs, &before_core);
+	ufs_malibu_read_vote_psms(&vote_regs, lpcm, &before_core);
 	core_ret = pm_runtime_resume_and_get(core);
-	ufs_malibu_read_psms(ufs, &after_core);
+	ufs_malibu_read_vote_psms(&vote_regs, lpcm, &after_core);
 	ret = core_ret;
 	if (ret >= 0) {
 		phase = "phy-power-ready";
@@ -542,7 +632,7 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 log_prep_failure:
 	ufs_malibu_log_vote_psms(dev, "prep", &before_prep, &after_prep, prep_ret);
 hold:
-	dev_info(dev, "ufs-uic-v29 probe phase=%s ret=%d; retaining remaining UFS votes\n",
+	dev_info(dev, "ufs-uic-v30 probe phase=%s ret=%d; retaining remaining UFS votes\n",
 		 phase, ret);
 put_cpm:
 	ufs_malibu_log_setup_psms(dev, setup, setup_count);
@@ -571,12 +661,12 @@ static int ufs_malibu_probe(struct platform_device *pdev)
 		devres_remove_group(dev, group);
 		return 0;
 	}
-	dev_info(dev, "ufs-uic-v29 probe result before devres release: %d\n", ret);
+	dev_info(dev, "ufs-uic-v30 probe result before devres release: %d\n", ret);
 	devres_release_group(dev, group);
 	if (ret)
 		return dev_err_probe(dev, ret, "UFS link diagnostic failed\n");
 
-	dev_info(dev, "ufs-uic-v29 UFS link, HCI IRQ and Hibern8 verified; release sequence finished\n");
+	dev_info(dev, "ufs-uic-v30 UFS link, HCI IRQ and Hibern8 verified; release sequence finished\n");
 	return 0;
 }
 
