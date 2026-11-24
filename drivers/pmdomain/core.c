@@ -874,6 +874,26 @@ err:
 	return ret;
 }
 
+/* This boot diagnostic is restricted to the Malibu UFS prep and core domains. */
+static bool genpd_trace_malibu_ufs(const struct generic_pm_domain *genpd)
+{
+	return IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_GENPD_TRACE) &&
+	       genpd->name &&
+	       (!strcmp(genpd->name, "HsioSUfsPrep.v") ||
+		!strcmp(genpd->name, "HsioSUfs.v"));
+}
+
+static void genpd_trace_malibu_state(const struct generic_pm_domain *genpd, const char *event)
+{
+	if (!genpd_trace_malibu_ufs(genpd))
+		return;
+
+	pr_info("malibu-ufs-genpd: %s domain=%s on=%d stay_on=%d always_on=%d rpm_always_on=%d prepared=%u subdomains_on=%d devices=%u\n",
+		event, genpd->name, genpd_status_on(genpd), genpd->stay_on,
+		!!genpd_is_always_on(genpd), !!genpd_is_rpm_always_on(genpd),
+		genpd->prepared_count, atomic_read(&genpd->sd_count), genpd->device_count);
+}
+
 static int _genpd_power_off(struct generic_pm_domain *genpd, bool timed)
 {
 	unsigned int state_idx = genpd->state_idx;
@@ -886,12 +906,17 @@ static int _genpd_power_off(struct generic_pm_domain *genpd, bool timed)
 					     GENPD_NOTIFY_PRE_OFF,
 					     GENPD_NOTIFY_ON, NULL);
 	ret = notifier_to_errno(ret);
-	if (ret)
+	if (ret) {
+		genpd_trace_malibu_state(genpd, "notifier-veto");
 		return ret;
+	}
 
-	if (!genpd->power_off)
+	if (!genpd->power_off) {
+		genpd_trace_malibu_state(genpd, "no-off-callback");
 		goto out;
+	}
 
+	genpd_trace_malibu_state(genpd, "provider-off");
 	timed = timed && genpd->gd && !genpd->states[state_idx].fwnode;
 	if (!timed) {
 		ret = genpd->power_off(genpd);
@@ -965,8 +990,10 @@ static void genpd_power_off(struct generic_pm_domain *genpd, bool one_dev_on,
 	 */
 	if (!genpd_status_on(genpd) || genpd->prepared_count > 0 ||
 	    genpd_is_always_on(genpd) || genpd_is_rpm_always_on(genpd) ||
-	    genpd->stay_on || atomic_read(&genpd->sd_count) > 0)
+	    genpd->stay_on || atomic_read(&genpd->sd_count) > 0) {
+		genpd_trace_malibu_state(genpd, "entry-gate");
 		return;
+	}
 
 	/*
 	 * The children must be in their deepest (powered-off) states to allow
@@ -976,8 +1003,13 @@ static void genpd_power_off(struct generic_pm_domain *genpd, bool one_dev_on,
 	 */
 	list_for_each_entry(link, &genpd->parent_links, parent_node) {
 		struct generic_pm_domain *child = link->child;
-		if (child->state_idx < child->state_count - 1)
+		if (child->state_idx < child->state_count - 1) {
+			if (genpd_trace_malibu_ufs(genpd))
+				pr_info("malibu-ufs-genpd: child-shallow domain=%s child=%s state=%u deepest=%u\n",
+					genpd->name, child->name, child->state_idx,
+					child->state_count - 1);
 			return;
+		}
 	}
 
 	list_for_each_entry(pdd, &genpd->dev_list, list_node) {
@@ -990,16 +1022,26 @@ static void genpd_power_off(struct generic_pm_domain *genpd, bool one_dev_on,
 			not_suspended++;
 
 		/* The device may need its PM domain to stay powered on. */
-		if (to_gpd_data(pdd)->rpm_always_on)
+		if (to_gpd_data(pdd)->rpm_always_on) {
+			if (genpd_trace_malibu_ufs(genpd))
+				pr_info("malibu-ufs-genpd: device-always-on domain=%s device=%s\n",
+					genpd->name, dev_name(pdd->dev));
 			return;
+		}
 	}
 
-	if (not_suspended > 1 || (not_suspended == 1 && !one_dev_on))
+	if (not_suspended > 1 || (not_suspended == 1 && !one_dev_on)) {
+		if (genpd_trace_malibu_ufs(genpd))
+			pr_info("malibu-ufs-genpd: active-devices domain=%s count=%u one_dev_on=%d\n",
+				genpd->name, not_suspended, one_dev_on);
 		return;
+	}
 
 	if (genpd->gov && genpd->gov->power_down_ok) {
-		if (!genpd->gov->power_down_ok(&genpd->domain))
+		if (!genpd->gov->power_down_ok(&genpd->domain)) {
+			genpd_trace_malibu_state(genpd, "governor-veto");
 			return;
+		}
 	}
 
 	/* Default to shallowest state. */
@@ -1007,8 +1049,10 @@ static void genpd_power_off(struct generic_pm_domain *genpd, bool one_dev_on,
 		genpd->state_idx = 0;
 
 	/* Don't power off, if a child domain is waiting to power on. */
-	if (atomic_read(&genpd->sd_count) > 0)
+	if (atomic_read(&genpd->sd_count) > 0) {
+		genpd_trace_malibu_state(genpd, "child-powering-on");
 		return;
+	}
 
 	if (_genpd_power_off(genpd, true)) {
 		genpd->states[genpd->state_idx].rejected++;
@@ -1148,6 +1192,7 @@ static void genpd_power_off_work_fn(struct work_struct *work)
 	genpd = container_of(work, struct generic_pm_domain, power_off_work);
 
 	genpd_lock(genpd);
+	genpd_trace_malibu_state(genpd, "worker");
 	genpd_power_off(genpd, false, 0);
 	genpd_unlock(genpd);
 }
@@ -1377,6 +1422,8 @@ static int __init genpd_power_off_unused(void)
 	mutex_lock(&gpd_list_lock);
 
 	list_for_each_entry(genpd, &gpd_list, gpd_list_node) {
+		if (genpd_trace_malibu_ufs(genpd))
+			pr_info("malibu-ufs-genpd: sweep-queue domain=%s\n", genpd->name);
 		genpd_queue_power_off_work(genpd);
 	}
 
@@ -2454,6 +2501,7 @@ int pm_genpd_init(struct generic_pm_domain *genpd,
 	if (ret)
 		return ret;
 
+	genpd_trace_malibu_state(genpd, "init");
 	mutex_lock(&gpd_list_lock);
 	list_add(&genpd->gpd_list_node, &gpd_list);
 	mutex_unlock(&gpd_list_lock);
@@ -3692,6 +3740,7 @@ void of_genpd_sync_state(struct device_node *np)
 	list_for_each_entry(genpd, &gpd_list, gpd_list_node) {
 		if (genpd->provider == of_fwnode_handle(np)) {
 			genpd_lock(genpd);
+			genpd_trace_malibu_state(genpd, "of-provider-sync");
 			genpd->stay_on = false;
 			genpd_power_off(genpd, false, 0);
 			genpd_unlock(genpd);
@@ -3720,6 +3769,7 @@ static void genpd_provider_sync_state(struct device *dev)
 
 	case GENPD_SYNC_STATE_SIMPLE:
 		genpd_lock(genpd);
+		genpd_trace_malibu_state(genpd, "provider-sync");
 		genpd->stay_on = false;
 		genpd_power_off(genpd, false, 0);
 		genpd_unlock(genpd);

@@ -136,6 +136,15 @@ config COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_IDLE_DIAG
 	  show PSM1 moving from 3 to 2. The UFS host stays disabled.
 	  Leave disabled in normal kernels.
 
+config COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_GENPD_TRACE
+	bool "Trace Grizzly UFS genpd idle decisions"
+	depends on COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_IDLE_DIAG && PM_GENERIC_DOMAINS_OF
+	help
+	  Log the idle sweep, boot-on latch, provider sync and power-off
+	  decisions for Malibu UFS prep and core. Leave the domain policy
+	  and hardware requests unchanged.
+	  Leave disabled except when collecting diagnostic boot logs.
+
 config COMMON_CLK_SCMI
 	tristate "Clock driver controlled via SCMI interface"
 	depends on ARM_SCMI_PROTOCOL || COMPILE_TEST
