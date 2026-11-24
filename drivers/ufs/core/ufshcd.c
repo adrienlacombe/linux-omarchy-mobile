@@ -11222,19 +11222,54 @@ static void ufshcd_abort_init(struct ufs_hba *hba)
 	}
 }
 
+static int ufshcd_probe_hibern8(struct ufs_hba *hba)
+{
+	int ret;
+
+	/* Clock gating must not wake this one-shot link during cleanup. */
+	if (ufshcd_can_hibern8_during_gating(hba))
+		return -EOPNOTSUPP;
+	if (!ufshcd_is_hba_active(hba) || !hba->is_irq_enabled ||
+	    !(ufshcd_readl(hba, REG_INTERRUPT_ENABLE) & UIC_HIBERNATE_ENTER))
+		return -EIO;
+
+	/* Only a fresh, explicit Hibern8-enter IRQ may complete this request. */
+	if (ufshcd_is_auto_hibern8_supported(hba)) {
+		ufshcd_writel(hba, 0, REG_AUTO_HIBERNATE_IDLE_TIMER);
+		ufshcd_readl(hba, REG_AUTO_HIBERNATE_IDLE_TIMER);
+	}
+	ufshcd_disable_intr(hba, UFSHCD_UIC_PWR_MASK & ~UIC_HIBERNATE_ENTER);
+	ufshcd_writel(hba, UIC_HIBERNATE_ENTER, REG_INTERRUPT_STATUS);
+	ufshcd_readl(hba, REG_INTERRUPT_STATUS);
+	synchronize_irq(hba->irq);
+
+	ufshcd_set_link_active(hba);
+	/* The link-only HBA has no queues or device to recover. */
+	hba->pm_op_in_progress = true;
+	ret = ufshcd_uic_hibern8_enter(hba);
+	hba->pm_op_in_progress = false;
+	if (!ret)
+		ufshcd_set_link_hibern8(hba);
+
+	return ret;
+}
+
 /**
  * ufshcd_init_common - Driver initialization routine
  * @hba: per-adapter instance
  * @mmio_base: base register address
  * @irq: Interrupt line of device
  * @link_only: Test the UIC link and release the HBA without registering storage
+ * @report: If set, test Hibern8 and report both results before cleanup
  *
  * Return: 0 on success; < 0 on failure.
  */
 static int ufshcd_init_common(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq,
-			      bool link_only)
+			      bool link_only,
+			      void (*report)(struct ufs_hba *hba, int link_err, int hibern8_err))
 {
-	int err;
+	bool abort_init = false, exit_hba = false;
+	int err, hibern8_err = -ECANCELED;
 	struct Scsi_Host *host = hba->host;
 	struct device *dev = hba->dev;
 
@@ -11409,6 +11444,11 @@ static int ufshcd_init_common(struct ufs_hba *hba, void __iomem *mmio_base, unsi
 		ufshcd_set_ufs_dev_active(hba);
 		hba->ufshcd_state = UFSHCD_STATE_RESET;
 		err = ufshcd_link_startup(hba, false);
+		if (report) {
+			dev_info(dev, "UIC link test result %d\n", err);
+			if (!err)
+				hibern8_err = ufshcd_probe_hibern8(hba);
+		}
 		goto out_abort_init;
 	}
 
@@ -11497,16 +11537,25 @@ initialized:
 	return 0;
 
 out_abort_init:
-	ufshcd_abort_init(hba);
+	abort_init = true;
 out_disable:
-	ufshcd_hba_exit(hba);
+	exit_hba = true;
 out_error:
+	if (report) {
+		report(hba, err, hibern8_err);
+		if (!err)
+			err = hibern8_err;
+	}
+	if (abort_init)
+		ufshcd_abort_init(hba);
+	if (exit_hba)
+		ufshcd_hba_exit(hba);
 	return err > 0 ? -EIO : err;
 }
 
 int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 {
-	return ufshcd_init_common(hba, mmio_base, irq, false);
+	return ufshcd_init_common(hba, mmio_base, irq, false, NULL);
 }
 EXPORT_SYMBOL_GPL(ufshcd_init);
 
@@ -11521,9 +11570,33 @@ EXPORT_SYMBOL_GPL(ufshcd_init);
  */
 int ufshcd_probe_link(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 {
-	return ufshcd_init_common(hba, mmio_base, irq, true);
+	return ufshcd_init_common(hba, mmio_base, irq, true, NULL);
 }
 EXPORT_SYMBOL_GPL(ufshcd_probe_link);
+
+/**
+ * ufshcd_probe_link_hibern8 - Run a synchronous UIC link and Hibern8 test
+ * @hba: Allocated host with powered suppliers
+ * @mmio_base: HCI register base
+ * @irq: HCI interrupt
+ * @report: Required callback that may sleep. Called once before cleanup with
+ *          the link error and the Hibern8 error, or -ECANCELED if skipped.
+ *          The HBA may only be partially initialized after a link error.
+ *
+ * Enter Hibern8 only after link startup. The controller and IRQ remain live
+ * through @report after successful tests. No transfer queues are started.
+ *
+ * Return: Zero on success, or the first error.
+ */
+int ufshcd_probe_link_hibern8(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq,
+			      void (*report)(struct ufs_hba *hba, int link_err, int hibern8_err))
+{
+	if (!report)
+		return -EINVAL;
+
+	return ufshcd_init_common(hba, mmio_base, irq, true, report);
+}
+EXPORT_SYMBOL_GPL(ufshcd_probe_link_hibern8);
 
 void ufshcd_resume_complete(struct device *dev)
 {

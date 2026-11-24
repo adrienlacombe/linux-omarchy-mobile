@@ -2,7 +2,12 @@
 #ifndef _UFS_MALIBU_PHY_H
 #define _UFS_MALIBU_PHY_H
 
+#include <linux/bits.h>
 #include <linux/types.h>
+
+#define MALIBU_UFS_PSM_STATE		GENMASK(4, 0)
+#define MALIBU_UFS_PSM_OFF		0x11
+#define MALIBU_UFS_PSM_ON		0x10
 
 struct device;
 struct reset_control;

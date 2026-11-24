@@ -39,16 +39,18 @@ config SCSI_UFSHCD_PLATFORM
 	  If unsure, say N.
 
 config SCSI_UFS_MALIBU
-	tristate "Google Malibu UFS link diagnostic"
-	depends on SCSI_UFSHCD_PLATFORM && COMMON_CLK_GOOGLE_MALIBU_CPM
+	bool "Google Malibu UFS link diagnostic"
+	depends on SCSI_UFSHCD_PLATFORM=y && COMMON_CLK_GOOGLE_MALIBU_CPM=y
 	depends on GPIOLIB && PINCTRL
 	depends on ARM_SMMU_V3 && IOMMU_DMA
 	help
 	  Build the Google Tensor G6 Malibu UFS bring-up code.
 	  The code sets up the device supplies and GPIOs, checks
 	  bootloader calibration data and programs the local UniPro
-	  attributes before a synchronous link test. The diagnostic releases
-	  the controller without registering a SCSI host or storage.
+	  attributes before a synchronous link test. It releases the clock
+	  votes only after Hibern8 and PHY power-state checks. On an
+	  unqualified exit it keeps the acquired votes for this boot.
+	  The diagnostic does not register a SCSI host or storage.
 
 	  If unsure, say N.
 

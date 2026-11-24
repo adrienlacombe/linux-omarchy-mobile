@@ -255,7 +255,48 @@ static void __iomem *ufs_malibu_map(struct platform_device *pdev, const char *na
 	return devm_ioremap_resource(&pdev->dev, res);
 }
 
-static int ufs_malibu_run_probe(struct platform_device *pdev)
+struct malibu_ufs_psm_status {
+	u32 hci;
+	u32 phy;
+};
+
+static bool ufs_malibu_psms_off(struct ufs_malibu *ufs,
+				struct malibu_ufs_psm_status *status)
+{
+	status->hci = readl(ufs->psm_hci);
+	status->phy = readl(ufs->phy.psm);
+
+	return (status->hci & MALIBU_UFS_PSM_STATE) == MALIBU_UFS_PSM_OFF &&
+	       (status->phy & MALIBU_UFS_PSM_STATE) == MALIBU_UFS_PSM_OFF;
+}
+
+/* Called before the UFS core stops HCI or releases the IRQ. */
+static void ufs_malibu_before_hci_stop(struct ufs_hba *hba, int link, int hibern8)
+{
+	struct ufs_malibu *ufs = ufshcd_get_variant(hba);
+	struct malibu_ufs_psm_status status;
+	bool off;
+	int ret;
+
+	dev_info(hba->dev, "ufs-uic-v22 probe result before HCI stop: link=%d hibern8=%d\n",
+		 link, hibern8);
+	if (link || hibern8)
+		return;
+
+	ret = read_poll_timeout(ufs_malibu_psms_off, off, off, 5, 10000, false,
+				ufs, &status);
+	ufs->deep_h8_release_result = ret;
+	dev_info(hba->dev, "ufs-uic-v22 Deep H8 gate: HC=%#x PHY=%#x ret=%d\n",
+		 status.hci, status.phy, ret);
+	if (ret)
+		return;
+
+	/* Keep the core clock, domains and device powered for this LPCM request. */
+	clk_unprepare(ufs->deep_h8);
+	dev_info(hba->dev, "ufs-uic-v22 Deep H8 unprepare returned\n");
+}
+
+static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 {
 	static const char * const domain_names[] = { "prep", "core" };
 	const struct dev_pm_domain_attach_data attach = {
@@ -263,16 +304,16 @@ static int ufs_malibu_run_probe(struct platform_device *pdev)
 		.num_pd_names = ARRAY_SIZE(domain_names),
 		.pd_flags = PD_FLAG_NO_DEV_LINK,
 	};
-	struct clk_bulk_data clocks[] = { { .id = "deep-h8" }, { .id = "core" } };
 	struct device *dev = &pdev->dev;
 	struct dev_pm_domain_list *domains;
 	struct device *cpm, *prep, *core;
 	struct ufs_hba *hba;
 	struct ufs_malibu *ufs;
-	struct clk *mphy;
+	struct clk *mphy, *core_clk;
 	void __iomem *hci;
+	const char *phase;
 	u32 status;
-	int irq, ret, cleanup, i;
+	int irq, ret, prep_ret;
 
 	irq = ufs_malibu_get_hci_irq(pdev);
 	if (irq < 0)
@@ -304,6 +345,9 @@ static int ufs_malibu_run_probe(struct platform_device *pdev)
 	ufs->phy.psm = ufs_malibu_map(pdev, "psm-phy", 0x3c00d108, 4);
 	if (IS_ERR(ufs->phy.psm))
 		return PTR_ERR(ufs->phy.psm);
+	ufs->psm_hci = ufs_malibu_map(pdev, "psm-hci", 0x3c00c210, 4);
+	if (IS_ERR(ufs->psm_hci))
+		return PTR_ERR(ufs->psm_hci);
 	ufs->phy.reset = devm_reset_control_get_exclusive(dev, "phy");
 	if (IS_ERR(ufs->phy.reset))
 		return PTR_ERR(ufs->phy.reset);
@@ -314,11 +358,12 @@ static int ufs_malibu_run_probe(struct platform_device *pdev)
 	if (clk_get_rate(mphy) != 38400000)
 		return -EINVAL;
 
-	for (i = 0; i < ARRAY_SIZE(clocks); i++) {
-		clocks[i].clk = devm_clk_get(dev, clocks[i].id);
-		if (IS_ERR(clocks[i].clk))
-			return PTR_ERR(clocks[i].clk);
-	}
+	ufs->deep_h8 = devm_clk_get(dev, "deep-h8");
+	if (IS_ERR(ufs->deep_h8))
+		return PTR_ERR(ufs->deep_h8);
+	core_clk = devm_clk_get(dev, "core");
+	if (IS_ERR(core_clk))
+		return PTR_ERR(core_clk);
 	ret = devm_pm_domain_attach_list(dev, &attach, &domains);
 	if (ret != ARRAY_SIZE(domain_names))
 		return ret < 0 ? ret : -ENODEV;
@@ -335,54 +380,86 @@ static int ufs_malibu_run_probe(struct platform_device *pdev)
 	hba->lanes_per_direction = 2;
 	ufshcd_set_variant(hba, ufs);
 
-	ret = clk_bulk_prepare_enable(ARRAY_SIZE(clocks), clocks);
+	/*
+	 * CPM gates these clocks in prepare/unprepare. Bulk prepare would
+	 * unprepare Deep H8 on a core error without qualifying Hibern8.
+	 */
+	*retain = true;
+	phase = "deep-h8-prepare";
+	ret = clk_prepare(ufs->deep_h8);
 	if (ret)
-		goto put_cpm;
+		goto hold;
+	phase = "core-clock-prepare";
+	ret = clk_prepare(core_clk);
+	if (ret)
+		goto hold;
+	phase = "prep-domain";
 	ret = pm_runtime_resume_and_get(prep);
 	if (ret < 0)
-		goto disable_clocks;
+		goto hold;
+	phase = "phy-prepare";
 	ret = ufs_malibu_phy_prepare(&ufs->phy);
 	if (ret)
-		goto put_prep;
+		goto hold;
+	phase = "core-domain";
 	ret = pm_runtime_resume_and_get(core);
 	if (ret < 0)
-		goto put_prep;
+		goto hold;
+	phase = "phy-power-ready";
 	ret = ufs_malibu_phy_wait_power(&ufs->phy);
 	if (ret)
-		goto put_core;
+		goto hold;
+	phase = "hci-idle";
 	ret = ufs_malibu_check_idle(hci);
 	if (ret)
-		goto put_core;
+		goto hold;
+	phase = "phy-refclk";
 	ret = ufs_malibu_phy_post_power_on(&ufs->phy, 0);
 	if (ret)
-		goto put_core;
+		goto hold;
+	phase = "device-gpios";
 	ret = ufs_malibu_get_gpios(ufs);
 	if (ret)
-		goto put_core;
+		goto hold;
+	phase = "device-rails";
 	ret = ufs_malibu_device_prepare(&ufs->device, cpm);
 	if (ret)
-		goto put_core;
+		goto hold;
+	phase = "device-power-on";
 	ret = ufs_malibu_device_on(&ufs->device, ufs->phy.hs_lss);
 	if (ret)
-		goto put_core;
+		goto hold;
 
-	ret = ufshcd_probe_link(hba, hci, irq);
-	cleanup = readl_poll_timeout(hci + REG_CONTROLLER_ENABLE, status,
-				     !(status & CONTROLLER_ENABLE), 10, 1000);
-	ret = ret ?: cleanup;
-	cleanup = ufs_malibu_device_off(&ufs->device);
-	ret = ret ?: cleanup;
-put_core:
+	phase = "link-hibern8";
+	ufs->deep_h8_release_result = -ECANCELED;
+	ret = ufshcd_probe_link_hibern8(hba, hci, irq, ufs_malibu_before_hci_stop);
+	if (ret)
+		goto hold;
+	phase = "deep-h8-qualification";
+	ret = ufs->deep_h8_release_result;
+	if (ret)
+		goto hold;
+	phase = "hci-stop";
+	ret = readl_poll_timeout(hci + REG_CONTROLLER_ENABLE, status,
+				 !(status & CONTROLLER_ENABLE), 10, 1000);
+	if (ret)
+		goto hold;
+	phase = "device-power-off";
+	ret = ufs_malibu_device_off(&ufs->device);
+	if (ret)
+		goto hold;
 	ufs_malibu_phy_restore_refclk(&ufs->phy);
-	cleanup = pm_runtime_put_sync_suspend(core);
-	if (cleanup < 0)
-		ret = ret ?: cleanup;
-put_prep:
-	cleanup = pm_runtime_put_sync_suspend(prep);
-	if (cleanup < 0)
-		ret = ret ?: cleanup;
-disable_clocks:
-	clk_bulk_disable_unprepare(ARRAY_SIZE(clocks), clocks);
+	clk_unprepare(core_clk);
+	ret = pm_runtime_put_sync_suspend(core);
+	prep_ret = pm_runtime_put_sync_suspend(prep);
+	if (ret >= 0)
+		ret = min(prep_ret, 0);
+	*retain = false;
+	goto put_cpm;
+
+hold:
+	dev_info(dev, "ufs-uic-v22 probe phase=%s ret=%d; retaining remaining UFS votes\n",
+		 phase, ret);
 put_cpm:
 	put_device(cpm);
 	return ret;
@@ -392,6 +469,7 @@ static int ufs_malibu_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	void *group;
+	bool retain = false;
 	int ret;
 
 	if (!of_machine_is_compatible("google,malibu-grizzly"))
@@ -401,13 +479,19 @@ static int ufs_malibu_probe(struct platform_device *pdev)
 	if (!group)
 		return -ENOMEM;
 
-	ret = ufs_malibu_run_probe(pdev);
+	ret = ufs_malibu_run_probe(pdev, &retain);
 	dev_set_drvdata(dev, NULL);
+	if (retain) {
+		/* Leave the diagnostic bound and hold the resources for this boot. */
+		devres_remove_group(dev, group);
+		return 0;
+	}
+	dev_info(dev, "ufs-uic-v22 probe result before devres release: %d\n", ret);
 	devres_release_group(dev, group);
 	if (ret)
 		return dev_err_probe(dev, ret, "UFS link diagnostic failed\n");
 
-	dev_info(dev, "UFS link and HCI interrupt verified; controller released\n");
+	dev_info(dev, "ufs-uic-v22 UFS link, HCI IRQ and Hibern8 verified; release sequence finished\n");
 	return 0;
 }
 
@@ -422,6 +506,7 @@ static struct platform_driver ufs_malibu_driver = {
 	.driver = {
 		.name = "ufs-malibu",
 		.of_match_table = ufs_malibu_of_match,
+		.suppress_bind_attrs = true,
 	},
 };
-module_platform_driver(ufs_malibu_driver);
+builtin_platform_driver(ufs_malibu_driver);

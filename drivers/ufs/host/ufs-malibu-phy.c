@@ -28,9 +28,6 @@
 #define MALIBU_UFS_REFCLK_WAIT_US	0xff
 #define MALIBU_UFS_SS_PHY_STATUS	0x014
 #define MALIBU_UFS_SS_PHY_BUSY		GENMASK(3, 0)
-#define MALIBU_UFS_PSM_STATE		GENMASK(4, 0)
-#define MALIBU_UFS_PSM_OFF		0x11
-#define MALIBU_UFS_PSM_ON		0x10
 
 #define MALIBU_MPHY_ADDR_LO		0x810e
 #define MALIBU_MPHY_ADDR_HI		0x810f
@@ -311,6 +308,7 @@ int ufs_malibu_phy_init(struct ufs_hba *hba, struct ufs_malibu_phy *phy)
 	}
 
 assert_reset:
+	dev_info(hba->dev, "ufs-uic-v22 PHY init result before reset rollback: %d\n", ret);
 	reset_ret = reset_control_assert(phy->reset);
 	if (reset_ret)
 		dev_err(hba->dev, "failed to reassert M-PHY reset: %d\n", reset_ret);
