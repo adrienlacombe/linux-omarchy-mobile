@@ -9,6 +9,7 @@
 #include <linux/jiffies.h>
 #include <linux/mailbox_client.h>
 #include <linux/malibu-cpm.h>
+#include <linux/malibu-ufs-psm.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -57,6 +58,7 @@
 #define MALIBU_MBFS_NAME_SIZE		16
 #define MALIBU_MBFS_DOMAIN_COUNT	(MALIBU_CPM_PD_UFS + 1)
 #define MALIBU_MBFS_NO_PARENT		-1
+#define MALIBU_MBFS_HSIOS_ID		0x1a
 #define MALIBU_MBFS_UFS_PREP_ID		0x222
 #define MALIBU_MBFS_UFS_CORE_ID		0x220
 
@@ -75,6 +77,7 @@ struct malibu_cpm {
 	struct mutex transition_lock;
 	/* Protect response and transition state against the RX callback. */
 	spinlock_t response_lock;
+	struct malibu_ufs_psm_regs ufs_psm;
 	u32 frame[4];
 	u32 response[3];
 	u32 transition_id;
@@ -89,6 +92,7 @@ struct malibu_cpm {
 	bool running;
 	bool remote_reset;
 	bool stalled;
+	bool trace_ufs_psm;
 };
 
 struct malibu_cpm_clock {
@@ -518,7 +522,7 @@ void malibu_cpm_ufs_log_analog_rails(struct device *supplier, const char *phase)
 	guard(device)(supplier);
 	cpm = dev_get_drvdata(supplier);
 	if (supplier->driver != &malibu_cpm_driver.driver || !cpm) {
-		dev_info(supplier, "ufs-uic-v28 analog rails phase=%s unavailable ret=%d\n",
+		dev_info(supplier, "ufs-uic-v29 analog rails phase=%s unavailable ret=%d\n",
 			 phase, -EPROBE_DEFER);
 		return;
 	}
@@ -528,7 +532,7 @@ void malibu_cpm_ufs_log_analog_rails(struct device *supplier, const char *phase)
 		int enabled = malibu_cpm_rail_state(cpm, rails[i].id);
 		int selector = malibu_cpm_rail_selector(cpm, rails[i].id);
 
-		dev_info(supplier, "ufs-uic-v28 analog rail phase=%s name=%s enabled=%d selector=%d\n",
+		dev_info(supplier, "ufs-uic-v29 analog rail phase=%s name=%s enabled=%d selector=%d\n",
 			 phase, rails[i].name, enabled, selector);
 	}
 }
@@ -921,41 +925,57 @@ static int malibu_mbfs_set_domain(struct malibu_cpm_domain *domain, bool on)
 static void malibu_mbfs_log_ufs_vote(struct malibu_cpm_domain *domain,
 				     const char *source, int ret)
 {
-	if (domain->id == MALIBU_MBFS_UFS_PREP_ID || domain->id == MALIBU_MBFS_UFS_CORE_ID)
-		dev_info(domain->cpm->dev, "ufs-uic-v28 domain=%s vote=%s ret=%d\n",
+	if (domain->id == MALIBU_MBFS_UFS_PREP_ID || domain->id == MALIBU_MBFS_UFS_CORE_ID ||
+	    (domain->id == MALIBU_MBFS_HSIOS_ID && domain->cpm->trace_ufs_psm))
+		dev_info(domain->cpm->dev, "ufs-uic-v29 domain=%s vote=%s ret=%d\n",
 			 domain->genpd.name, source, ret);
 }
 
 static int malibu_mbfs_power_on(struct generic_pm_domain *genpd)
 {
 	struct malibu_cpm_domain *domain = container_of(genpd, struct malibu_cpm_domain, genpd);
+	struct malibu_cpm *cpm = domain->cpm;
+	struct malibu_ufs_psm_sample before, after;
+	bool trace_hsios = domain->id == MALIBU_MBFS_HSIOS_ID && cpm->trace_ufs_psm;
+	const char *source;
 	bool on;
 	int ret;
 
 	if (!domain->lazy)
 		return malibu_mbfs_set_domain(domain, true);
 
+	if (trace_hsios)
+		malibu_ufs_sample_psms(&cpm->ufs_psm, &before);
+
 	/* Leave domains inherited from the bootloader in their original state. */
-	ret = malibu_mbfs_lookup(domain->cpm, domain->cpm->mbfs_root, genpd->name,
-				 &domain->handle);
-	if (ret) {
-		malibu_mbfs_log_ufs_vote(domain, "lookup-error", ret);
-		return ret;
-	}
+	source = "lookup-error";
+	ret = malibu_mbfs_lookup(cpm, cpm->mbfs_root, genpd->name, &domain->handle);
+	if (ret)
+		goto out;
+	source = "read-error";
 	ret = malibu_mbfs_read_domain(domain, &on);
-	if (ret) {
-		malibu_mbfs_log_ufs_vote(domain, "read-error", ret);
-		return ret;
-	}
-	if (on) {
-		malibu_mbfs_log_ufs_vote(domain, "inherited", 0);
-		return 0;
-	}
+	if (ret)
+		goto out;
+	source = "inherited";
+	if (on)
+		goto out;
 
 	ret = malibu_mbfs_set_domain(domain, true);
 	if (!ret)
 		domain->powered_here = true;
-	malibu_mbfs_log_ufs_vote(domain, ret ? "request-error" : "issued", ret);
+	source = ret ? "request-error" : "issued";
+out:
+	if (trace_hsios) {
+		if (!ret)
+			malibu_ufs_sample_psms(&cpm->ufs_psm, &after);
+		malibu_ufs_log_psms(cpm->dev, "hsios-power-before", &before);
+		if (!ret)
+			malibu_ufs_log_psms(cpm->dev, "hsios-power-after", &after);
+		else
+			dev_info(cpm->dev, "ufs-uic-v29 hsios-power-after PSM skipped ret=%d\n",
+				 ret);
+	}
+	malibu_mbfs_log_ufs_vote(domain, source, ret);
 	return ret;
 }
 
@@ -1010,7 +1030,7 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 		[MALIBU_CPM_PD_LSIOE] = { "lsio_e.v", 0x1d, MALIBU_MBFS_NO_PARENT },
 		[MALIBU_CPM_PD_LSIOE_CLI] = { "LsioECli.v", 0x230, MALIBU_CPM_PD_LSIOE },
 		[MALIBU_CPM_PD_HSIOS] = {
-			"hsio_s.v", 0x1a, MALIBU_MBFS_NO_PARENT, .lazy = true,
+			"hsio_s.v", MALIBU_MBFS_HSIOS_ID, MALIBU_MBFS_NO_PARENT, .lazy = true,
 		},
 		[MALIBU_CPM_PD_UFS_PREP] = {
 			"HsioSUfsPrep.v", MALIBU_MBFS_UFS_PREP_ID, MALIBU_CPM_PD_HSIOS,
@@ -1187,6 +1207,7 @@ static int malibu_cpm_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	unsigned long remaining = msecs_to_jiffies(MALIBU_CPM_CLOCK_TIMEOUT_MS);
+	struct malibu_ufs_psm_sample before_handshake;
 	struct mbox_chan *rx;
 	struct malibu_cpm *cpm;
 	int ret;
@@ -1214,9 +1235,15 @@ static int malibu_cpm_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to get CPM request channel\n");
 
+	cpm->trace_ufs_psm = malibu_ufs_map_psms(dev, &cpm->ufs_psm);
+	if (cpm->trace_ufs_psm)
+		malibu_ufs_sample_psms(&cpm->ufs_psm, &before_handshake);
+
 	/* The startup frame completes at TX retirement. */
 	cpm->frame[0] = MALIBU_CPM_RESET_FRAME;
 	ret = malibu_cpm_transmit(cpm, &remaining, 0);
+	if (cpm->trace_ufs_psm)
+		malibu_ufs_log_psms(dev, "cpm-before-handshake", &before_handshake);
 	if (ret)
 		return dev_err_probe(dev, ret, "CPM mailbox handshake failed\n");
 	scoped_guard(spinlock_irqsave, &cpm->response_lock)

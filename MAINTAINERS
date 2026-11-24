@@ -11227,6 +11227,7 @@ F:	include/dt-bindings/clock/google,gs101*
 F:	include/dt-bindings/clock/google,gs201*
 F:	include/dt-bindings/clock/google,malibu-cpm-io.h
 F:	include/linux/malibu-cpm.h
+F:	include/linux/malibu-ufs-psm.h
 F:	include/dt-bindings/clock/google,zuma-acpm.h
 F:	include/dt-bindings/clock/google,zuma.h
 F:	include/dt-bindings/clock/google,zumapro*

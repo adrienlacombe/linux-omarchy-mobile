@@ -8,6 +8,7 @@
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqdomain.h>
 #include <linux/limits.h>
+#include <linux/malibu-ufs-psm.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
@@ -19,6 +20,7 @@
 #define MALIBU_SGIA_PULSE_STATUS		0x04
 #define MALIBU_SGIA_CLEAR		0x08
 #define MALIBU_SGIA_ENABLE		0x0c
+#define MALIBU_SGIA_UFS_BASE		0x3c272040
 
 struct malibu_sgia {
 	void __iomem *base;
@@ -153,8 +155,11 @@ static const struct dev_pm_ops malibu_sgia_pm_ops = {
 static int malibu_sgia_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct malibu_ufs_psm_sample before, after;
+	struct malibu_ufs_psm_regs ufs_psm = {};
 	struct malibu_sgia *sgia;
 	struct resource *res;
+	bool trace_ufs;
 	int parent_irq;
 	int ret;
 
@@ -177,6 +182,7 @@ static int malibu_sgia_probe(struct platform_device *pdev)
 	if (of_property_present(dev->of_node, "power-domains") && !dev->pm_domain)
 		return dev_err_probe(dev, -ENODEV, "missing interrupt aggregator power domain\n");
 
+	trace_ufs = res->start == MALIBU_SGIA_UFS_BASE && malibu_ufs_map_psms(dev, &ufs_psm);
 	ret = devm_pm_runtime_enable(dev);
 	if (ret)
 		return ret;
@@ -184,12 +190,16 @@ static int malibu_sgia_probe(struct platform_device *pdev)
 	ret = pm_runtime_resume_and_get(dev);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to power interrupt aggregator\n");
+	if (trace_ufs)
+		malibu_ufs_sample_psms(&ufs_psm, &before);
 
 	raw_spin_lock_init(&sgia->lock);
 	malibu_sgia_restore(sgia);
 	sgia->domain = irq_domain_create_linear(dev_fwnode(dev), MALIBU_SGIA_NUM_IRQS,
 						&malibu_sgia_domain_ops, sgia);
 	if (!sgia->domain) {
+		if (trace_ufs)
+			malibu_ufs_log_psms(dev, "sgia-before-irq-setup", &before);
 		pm_runtime_put_sync(dev);
 		return -ENOMEM;
 	}
@@ -197,6 +207,11 @@ static int malibu_sgia_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, sgia);
 	irq_set_status_flags(parent_irq, IRQ_DISABLE_UNLAZY);
 	irq_set_chained_handler_and_data(parent_irq, malibu_sgia_chained_irq, sgia);
+	if (trace_ufs) {
+		malibu_ufs_sample_psms(&ufs_psm, &after);
+		malibu_ufs_log_psms(dev, "sgia-before-irq-setup", &before);
+		malibu_ufs_log_psms(dev, "sgia-after-irq-setup", &after);
+	}
 	return 0;
 }
 
