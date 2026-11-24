@@ -820,6 +820,9 @@ enum ufshcd_quirks {
 	 * allowed by M-PHY spec ver 6.0.
 	 */
 	UFSHCD_QUIRK_EXTENDED_TX_EQTR_ADAPT_LENGTH_L0L1L2L3	= 1 << 28,
+
+	/* Verify bRefClkFreq against the host clock without changing it. */
+	UFSHCD_QUIRK_READ_ONLY_REF_CLK				= 1 << 29,
 };
 
 enum ufshcd_caps {

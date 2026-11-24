@@ -9167,9 +9167,15 @@ void ufshcd_parse_dev_ref_clk_freq(struct ufs_hba *hba, struct clk *refclk)
 
 static int ufshcd_set_dev_ref_clk(struct ufs_hba *hba)
 {
+	bool read_only = hba->quirks & UFSHCD_QUIRK_READ_ONLY_REF_CLK;
 	int err;
 	u32 ref_clk;
 	u32 freq = hba->dev_ref_clk_freq;
+
+	if (read_only && freq >= ARRAY_SIZE(ufs_ref_clk_freqs) - 1) {
+		dev_err(hba->dev, "cannot validate bRefClkFreq without a valid host reference clock\n");
+		return -EINVAL;
+	}
 
 	err = ufshcd_query_attr_retry(hba, UPIU_QUERY_OPCODE_READ_ATTR,
 			QUERY_ATTR_IDN_REF_CLK_FREQ, 0, 0, &ref_clk);
@@ -9178,6 +9184,17 @@ static int ufshcd_set_dev_ref_clk(struct ufs_hba *hba)
 		dev_err(hba->dev, "failed reading bRefClkFreq. err = %d\n",
 			err);
 		goto out;
+	}
+
+	if (read_only) {
+		dev_info(hba->dev, "bRefClkFreq=%#x, expected %#x (%lu Hz)\n",
+			 ref_clk, freq, ufs_ref_clk_freqs[freq].freq_hz);
+		if (ref_clk != freq) {
+			dev_err(hba->dev, "bRefClkFreq mismatch; leaving the device attribute unchanged\n");
+			return -EINVAL;
+		}
+
+		return 0;
 	}
 
 	if (ref_clk == freq)
@@ -9433,6 +9450,12 @@ static int ufshcd_post_device_init(struct ufs_hba *hba)
 {
 	int ret;
 
+	if (hba->quirks & UFSHCD_QUIRK_READ_ONLY_REF_CLK) {
+		ret = ufshcd_set_dev_ref_clk(hba);
+		if (ret)
+			return ret;
+	}
+
 	ufshcd_tune_unipro_params(hba);
 
 	/* UFS device is also active now */
@@ -9454,7 +9477,8 @@ static int ufshcd_post_device_init(struct ufs_hba *hba)
 	 * Set the right value to bRefClkFreq in LS_MODE before attempting to
 	 * switch to HS gears.
 	 */
-	if (ufshcd_get_op_mode(hba) == LS_MODE &&
+	if (!(hba->quirks & UFSHCD_QUIRK_READ_ONLY_REF_CLK) &&
+	    ufshcd_get_op_mode(hba) == LS_MODE &&
 	    hba->dev_ref_clk_freq != REF_CLK_FREQ_INVAL)
 		ufshcd_set_dev_ref_clk(hba);
 
