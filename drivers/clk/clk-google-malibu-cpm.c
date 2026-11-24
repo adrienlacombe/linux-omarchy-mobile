@@ -522,7 +522,7 @@ void malibu_cpm_ufs_log_analog_rails(struct device *supplier, const char *phase)
 	guard(device)(supplier);
 	cpm = dev_get_drvdata(supplier);
 	if (supplier->driver != &malibu_cpm_driver.driver || !cpm) {
-		dev_info(supplier, "ufs-uic-v31 analog rails phase=%s unavailable ret=%d\n",
+		dev_info(supplier, "ufs-uic-v32 analog rails phase=%s unavailable ret=%d\n",
 			 phase, -EPROBE_DEFER);
 		return;
 	}
@@ -532,7 +532,7 @@ void malibu_cpm_ufs_log_analog_rails(struct device *supplier, const char *phase)
 		int enabled = malibu_cpm_rail_state(cpm, rails[i].id);
 		int selector = malibu_cpm_rail_selector(cpm, rails[i].id);
 
-		dev_info(supplier, "ufs-uic-v31 analog rail phase=%s name=%s enabled=%d selector=%d\n",
+		dev_info(supplier, "ufs-uic-v32 analog rail phase=%s name=%s enabled=%d selector=%d\n",
 			 phase, rails[i].name, enabled, selector);
 	}
 }
@@ -927,7 +927,7 @@ static void malibu_mbfs_log_ufs_vote(struct malibu_cpm_domain *domain,
 {
 	if (domain->id == MALIBU_MBFS_UFS_PREP_ID || domain->id == MALIBU_MBFS_UFS_CORE_ID ||
 	    (domain->id == MALIBU_MBFS_HSIOS_ID && domain->cpm->trace_ufs_psm))
-		dev_info(domain->cpm->dev, "ufs-uic-v31 domain=%s vote=%s ret=%d\n",
+		dev_info(domain->cpm->dev, "ufs-uic-v32 domain=%s vote=%s ret=%d\n",
 			 domain->genpd.name, source, ret);
 }
 
@@ -972,7 +972,7 @@ out:
 		if (!ret)
 			malibu_ufs_log_psms(cpm->dev, "hsios-power-after", &after);
 		else
-			dev_info(cpm->dev, "ufs-uic-v31 hsios-power-after PSM skipped ret=%d\n",
+			dev_info(cpm->dev, "ufs-uic-v32 hsios-power-after PSM skipped ret=%d\n",
 				 ret);
 	}
 	malibu_mbfs_log_ufs_vote(domain, source, ret);
