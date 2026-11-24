@@ -9,6 +9,7 @@
 #include <linux/iommu.h>
 #include <linux/iommu-dma.h>
 #include <linux/irq.h>
+#include <linux/malibu-cpm.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of_address.h>
@@ -278,7 +279,7 @@ static void ufs_malibu_before_hci_stop(struct ufs_hba *hba, int link, int hibern
 	bool off;
 	int ret;
 
-	dev_info(hba->dev, "ufs-uic-v23 probe result before HCI stop: link=%d hibern8=%d\n",
+	dev_info(hba->dev, "ufs-uic-v24 probe result before HCI stop: link=%d hibern8=%d\n",
 		 link, hibern8);
 	if (link || hibern8)
 		return;
@@ -286,14 +287,14 @@ static void ufs_malibu_before_hci_stop(struct ufs_hba *hba, int link, int hibern
 	ret = read_poll_timeout(ufs_malibu_psms_off, off, off, 5, 10000, false,
 				ufs, &status);
 	ufs->deep_h8_release_result = ret;
-	dev_info(hba->dev, "ufs-uic-v23 Deep H8 gate: HC=%#x PHY=%#x ret=%d\n",
+	dev_info(hba->dev, "ufs-uic-v24 Deep H8 gate: HC=%#x PHY=%#x ret=%d\n",
 		 status.hci, status.phy, ret);
 	if (ret)
 		return;
 
 	/* Keep the core clock, domains and device powered for this LPCM request. */
 	clk_unprepare(ufs->deep_h8);
-	dev_info(hba->dev, "ufs-uic-v23 Deep H8 unprepare returned\n");
+	dev_info(hba->dev, "ufs-uic-v24 Deep H8 unprepare returned\n");
 }
 
 static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
@@ -397,16 +398,22 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	ret = pm_runtime_resume_and_get(prep);
 	if (ret < 0)
 		goto hold;
+	/* Sample before TOP programming so the reads do not delay its core vote. */
+	malibu_cpm_ufs_log_analog_rails(cpm, "before-core");
 	phase = "phy-prepare";
 	ret = ufs_malibu_phy_prepare(&ufs->phy);
 	if (ret)
 		goto hold;
 	phase = "core-domain";
 	ret = pm_runtime_resume_and_get(core);
-	if (ret < 0)
+	if (ret < 0) {
+		malibu_cpm_ufs_log_analog_rails(cpm, "after-core-error");
 		goto hold;
+	}
 	phase = "phy-power-ready";
 	ret = ufs_malibu_phy_wait_power(dev, &ufs->phy, phase);
+	/* Keep the readiness poll ahead of the post-core mailbox reads. */
+	malibu_cpm_ufs_log_analog_rails(cpm, "after-core-poll");
 	if (ret)
 		goto hold;
 	phase = "hci-idle";
@@ -458,7 +465,7 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	goto put_cpm;
 
 hold:
-	dev_info(dev, "ufs-uic-v23 probe phase=%s ret=%d; retaining remaining UFS votes\n",
+	dev_info(dev, "ufs-uic-v24 probe phase=%s ret=%d; retaining remaining UFS votes\n",
 		 phase, ret);
 put_cpm:
 	put_device(cpm);
@@ -486,12 +493,12 @@ static int ufs_malibu_probe(struct platform_device *pdev)
 		devres_remove_group(dev, group);
 		return 0;
 	}
-	dev_info(dev, "ufs-uic-v23 probe result before devres release: %d\n", ret);
+	dev_info(dev, "ufs-uic-v24 probe result before devres release: %d\n", ret);
 	devres_release_group(dev, group);
 	if (ret)
 		return dev_err_probe(dev, ret, "UFS link diagnostic failed\n");
 
-	dev_info(dev, "ufs-uic-v23 UFS link, HCI IRQ and Hibern8 verified; release sequence finished\n");
+	dev_info(dev, "ufs-uic-v24 UFS link, HCI IRQ and Hibern8 verified; release sequence finished\n");
 	return 0;
 }
 

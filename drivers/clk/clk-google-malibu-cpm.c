@@ -57,6 +57,8 @@
 #define MALIBU_MBFS_NAME_SIZE		16
 #define MALIBU_MBFS_DOMAIN_COUNT	(MALIBU_CPM_PD_UFS + 1)
 #define MALIBU_MBFS_NO_PARENT		-1
+#define MALIBU_MBFS_UFS_PREP_ID		0x222
+#define MALIBU_MBFS_UFS_CORE_ID		0x220
 
 struct malibu_cpm {
 	struct device *dev;
@@ -482,13 +484,12 @@ static int malibu_cpm_register_usb2_rails(struct malibu_cpm *cpm)
 	return 0;
 }
 
-static int malibu_cpm_ufs_get_voltage_sel(struct regulator_dev *rdev)
+static int malibu_cpm_rail_selector(struct malibu_cpm *cpm, unsigned int id)
 {
 	u32 selector;
 	int ret;
 
-	ret = malibu_cpm_rail_request(rdev_get_drvdata(rdev), rdev_get_id(rdev),
-				      MALIBU_CPM_RAIL_GET_SELECTOR, 0, &selector);
+	ret = malibu_cpm_rail_request(cpm, id, MALIBU_CPM_RAIL_GET_SELECTOR, 0, &selector);
 	if (ret)
 		return ret;
 	if (selector > U8_MAX)
@@ -496,6 +497,42 @@ static int malibu_cpm_ufs_get_voltage_sel(struct regulator_dev *rdev)
 
 	return selector;
 }
+
+static int malibu_cpm_ufs_get_voltage_sel(struct regulator_dev *rdev)
+{
+	return malibu_cpm_rail_selector(rdev_get_drvdata(rdev), rdev_get_id(rdev));
+}
+
+void malibu_cpm_ufs_log_analog_rails(struct device *supplier, const char *phase)
+{
+	static const struct {
+		const char *name;
+		unsigned int id;
+	} rails[] = {
+		{ "LDO1S", MALIBU_CPM_LDO_1S },
+		{ "LDO24S", MALIBU_CPM_LDO_24S },
+	};
+	struct malibu_cpm *cpm;
+	unsigned int i;
+
+	guard(device)(supplier);
+	cpm = dev_get_drvdata(supplier);
+	if (supplier->driver != &malibu_cpm_driver.driver || !cpm) {
+		dev_info(supplier, "ufs-uic-v24 analog rails phase=%s unavailable ret=%d\n",
+			 phase, -EPROBE_DEFER);
+		return;
+	}
+
+	/* Use fresh CPM GETs because regulator consumers may cache always-on. */
+	for (i = 0; i < ARRAY_SIZE(rails); i++) {
+		int enabled = malibu_cpm_rail_state(cpm, rails[i].id);
+		int selector = malibu_cpm_rail_selector(cpm, rails[i].id);
+
+		dev_info(supplier, "ufs-uic-v24 analog rail phase=%s name=%s enabled=%d selector=%d\n",
+			 phase, rails[i].name, enabled, selector);
+	}
+}
+EXPORT_SYMBOL_GPL(malibu_cpm_ufs_log_analog_rails);
 
 static int malibu_cpm_ufs_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector)
 {
@@ -881,6 +918,14 @@ static int malibu_mbfs_set_domain(struct malibu_cpm_domain *domain, bool on)
 	return ret;
 }
 
+static void malibu_mbfs_log_ufs_vote(struct malibu_cpm_domain *domain,
+				     const char *source, int ret)
+{
+	if (domain->id == MALIBU_MBFS_UFS_PREP_ID || domain->id == MALIBU_MBFS_UFS_CORE_ID)
+		dev_info(domain->cpm->dev, "ufs-uic-v24 domain=%s vote=%s ret=%d\n",
+			 domain->genpd.name, source, ret);
+}
+
 static int malibu_mbfs_power_on(struct generic_pm_domain *genpd)
 {
 	struct malibu_cpm_domain *domain = container_of(genpd, struct malibu_cpm_domain, genpd);
@@ -893,15 +938,24 @@ static int malibu_mbfs_power_on(struct generic_pm_domain *genpd)
 	/* Leave domains inherited from the bootloader in their original state. */
 	ret = malibu_mbfs_lookup(domain->cpm, domain->cpm->mbfs_root, genpd->name,
 				 &domain->handle);
-	if (ret)
+	if (ret) {
+		malibu_mbfs_log_ufs_vote(domain, "lookup-error", ret);
 		return ret;
+	}
 	ret = malibu_mbfs_read_domain(domain, &on);
-	if (ret || on)
+	if (ret) {
+		malibu_mbfs_log_ufs_vote(domain, "read-error", ret);
 		return ret;
+	}
+	if (on) {
+		malibu_mbfs_log_ufs_vote(domain, "inherited", 0);
+		return 0;
+	}
 
 	ret = malibu_mbfs_set_domain(domain, true);
 	if (!ret)
 		domain->powered_here = true;
+	malibu_mbfs_log_ufs_vote(domain, ret ? "request-error" : "issued", ret);
 	return ret;
 }
 
@@ -959,10 +1013,12 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 			"hsio_s.v", 0x1a, MALIBU_MBFS_NO_PARENT, .lazy = true,
 		},
 		[MALIBU_CPM_PD_UFS_PREP] = {
-			"HsioSUfsPrep.v", 0x222, MALIBU_CPM_PD_HSIOS, .lazy = true,
+			"HsioSUfsPrep.v", MALIBU_MBFS_UFS_PREP_ID, MALIBU_CPM_PD_HSIOS,
+			.lazy = true,
 		},
 		[MALIBU_CPM_PD_UFS] = {
-			"HsioSUfs.v", 0x220, MALIBU_CPM_PD_UFS_PREP, .lazy = true,
+			"HsioSUfs.v", MALIBU_MBFS_UFS_CORE_ID, MALIBU_CPM_PD_UFS_PREP,
+			.lazy = true,
 		},
 	};
 	struct device *dev = cpm->dev;
