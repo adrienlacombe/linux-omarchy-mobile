@@ -38,17 +38,21 @@ static int max77779_spmi_set_roles(struct tcpci *tcpci, struct tcpci_data *data,
 				   enum typec_data_role data_role)
 {
 	struct max77779_spmi *chip = container_of(data, struct max77779_spmi, data);
+	const char *stage = "power status";
 	unsigned int value;
 	int ret;
 
 	if (!attached)
 		return max77779_spmi_disconnect(chip);
+	dev_info_ratelimited(chip->dev, "USB2 attach requested: power_role=%u data_role=%u\n",
+			     role, data_role);
 	if (role != TYPEC_SINK || data_role != TYPEC_DEVICE)
 		return -EOPNOTSUPP;
 
 	ret = regmap_read(data->regmap, TCPC_POWER_STATUS, &value);
 	if (ret)
 		goto disconnect;
+	dev_info_ratelimited(chip->dev, "USB2 attach power status: %#x\n", value);
 	if ((value & (TCPC_POWER_STATUS_UNINIT | TCPC_POWER_STATUS_DBG_ACC_CON |
 		      TCPC_POWER_STATUS_VBUS_PRES)) !=
 	    TCPC_POWER_STATUS_VBUS_PRES) {
@@ -56,23 +60,30 @@ static int max77779_spmi_set_roles(struct tcpci *tcpci, struct tcpci_data *data,
 		goto disconnect;
 	}
 
+	stage = "write data gate";
 	ret = regmap_write(data->regmap, TCPC_VENDOR_USBSW_CTRL,
 			   TCPC_VENDOR_USBSW_CTRL_ENABLE_USB_DATA);
 	if (ret)
 		goto disconnect;
+	stage = "read data gate";
 	ret = regmap_read(data->regmap, TCPC_VENDOR_USBSW_CTRL, &value);
 	if (ret)
 		goto disconnect;
+	dev_info_ratelimited(chip->dev, "USB2 attach data gate readback: %#x\n", value);
 	if (value != TCPC_VENDOR_USBSW_CTRL_ENABLE_USB_DATA) {
 		ret = -EIO;
 		goto disconnect;
 	}
 
+	stage = "device role";
 	ret = usb_role_switch_set_role(chip->session, USB_ROLE_DEVICE);
-	if (!ret)
+	if (!ret) {
+		dev_info_ratelimited(chip->dev, "USB2 attach enabled\n");
 		return 0;
+	}
 
 disconnect:
+	dev_info_ratelimited(chip->dev, "USB2 attach %s result: %d\n", stage, ret);
 	if (max77779_spmi_disconnect(chip))
 		dev_warn(chip->dev, "failed to fully disconnect the USB2 session\n");
 	return ret;
@@ -115,6 +126,9 @@ static irqreturn_t max77779_spmi_irq(int irq, void *data)
 	}
 	if (!status)
 		return IRQ_NONE;
+
+	if (status & cpu_to_le16(TCPC_ALERT_CC_STATUS | TCPC_ALERT_POWER_STATUS))
+		dev_info_ratelimited(chip->dev, "USB2 Type-C alert: %#x\n", le16_to_cpu(status));
 
 	/* Acknowledge any stale PD events without reading a PD buffer. */
 	ret = regmap_raw_write(regmap, TCPC_ALERT, &status, sizeof(status));
@@ -249,8 +263,11 @@ static int max77779_spmi_probe(struct spmi_device *sdev)
 	ret = devm_add_action_or_reset(dev, max77779_spmi_unregister, chip->tcpci);
 	if (ret)
 		return ret;
-	return devm_request_threaded_irq(dev, irq, NULL, max77779_spmi_irq,
-					 IRQF_TRIGGER_LOW | IRQF_ONESHOT, dev_name(dev), chip);
+	ret = devm_request_threaded_irq(dev, irq, NULL, max77779_spmi_irq,
+					IRQF_TRIGGER_LOW | IRQF_ONESHOT, dev_name(dev), chip);
+	if (!ret)
+		dev_info(dev, "USB2 Type-C port and alert IRQ ready\n");
+	return ret;
 }
 
 static const struct of_device_id max77779_spmi_of_match[] = {

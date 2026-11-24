@@ -54,6 +54,7 @@ static int malibu_dwc3_disconnect(struct malibu_dwc3 *malibu)
 
 static int malibu_dwc3_set_role(struct usb_role_switch *sw, enum usb_role role)
 {
+	const char *stage = "repeater";
 	struct malibu_dwc3 *malibu;
 	int ret;
 
@@ -61,14 +62,21 @@ static int malibu_dwc3_set_role(struct usb_role_switch *sw, enum usb_role role)
 	malibu = usb_role_switch_get_drvdata(sw);
 	if (!malibu)
 		return -ENODEV;
-	if (role == USB_ROLE_NONE)
-		return malibu_dwc3_disconnect(malibu);
+	dev_info_ratelimited(malibu->dev, "USB2 role request: %s\n", usb_role_string(role));
+	if (role == USB_ROLE_NONE) {
+		ret = malibu_dwc3_disconnect(malibu);
+		dev_info_ratelimited(malibu->dev, "USB2 disconnect result: %d\n", ret);
+		return ret;
+	}
 	if (role != USB_ROLE_DEVICE)
 		return -EOPNOTSUPP;
 
 	ret = usb_role_switch_set_role(malibu->repeater_switch, USB_ROLE_DEVICE);
-	if (!ret)
+	if (!ret) {
+		stage = "PHY";
 		ret = usb_role_switch_set_role(malibu->phy_switch, USB_ROLE_DEVICE);
+	}
+	dev_info_ratelimited(malibu->dev, "USB2 device role %s result: %d\n", stage, ret);
 	if (ret && malibu_dwc3_disconnect(malibu))
 		dev_warn(malibu->dev, "failed to fully roll back USB2 role\n");
 	return ret;
@@ -164,6 +172,7 @@ static int malibu_dwc3_register_role(struct malibu_dwc3 *malibu)
 	if (IS_ERR(sw))
 		return PTR_ERR(sw);
 	malibu->role_switch = sw;
+	dev_info(dev, "USB2 role switch registered in disconnected state\n");
 	return 0;
 }
 
