@@ -5,6 +5,7 @@
 #include <linux/cleanup.h>
 #include <linux/clk-provider.h>
 #include <linux/completion.h>
+#include <linux/devm-helpers.h>
 #include <linux/errno.h>
 #include <linux/jiffies.h>
 #include <linux/mailbox_client.h>
@@ -61,7 +62,6 @@
 #define MALIBU_MBFS_HSIOS_ID		0x1a
 #define MALIBU_MBFS_UFS_PREP_ID		0x222
 #define MALIBU_MBFS_UFS_CORE_ID		0x220
-#define MALIBU_D1_UFS_CFG_ACG		0x3c0199d8
 
 struct malibu_cpm {
 	struct device *dev;
@@ -79,6 +79,7 @@ struct malibu_cpm {
 	/* Protect response and transition state against the RX callback. */
 	spinlock_t response_lock;
 	struct malibu_ufs_psm_regs ufs_psm;
+	struct delayed_work ufs_observe_work;
 	u32 frame[4];
 	u32 response[3];
 	u32 transition_id;
@@ -94,6 +95,7 @@ struct malibu_cpm {
 	bool remote_reset;
 	bool stalled;
 	bool trace_ufs_psm;
+	bool ufs_observe_late;
 };
 
 struct malibu_cpm_clock {
@@ -526,7 +528,7 @@ void malibu_cpm_ufs_log_rails(struct device *supplier, const char *phase)
 	guard(device)(supplier);
 	cpm = dev_get_drvdata(supplier);
 	if (supplier->driver != &malibu_cpm_driver.driver || !cpm) {
-		dev_info(supplier, "ufs-uic-v37 rails phase=%s unavailable ret=%d\n",
+		dev_info(supplier, "ufs-uic-v38 rails phase=%s unavailable ret=%d\n",
 			 phase, -EPROBE_DEFER);
 		return;
 	}
@@ -536,7 +538,7 @@ void malibu_cpm_ufs_log_rails(struct device *supplier, const char *phase)
 		int enabled = malibu_cpm_rail_state(cpm, rails[i].id);
 		int selector = malibu_cpm_rail_selector(cpm, rails[i].id);
 
-		dev_info(supplier, "ufs-uic-v37 %s rail phase=%s name=%s enabled=%d selector=%d\n",
+		dev_info(supplier, "ufs-uic-v38 %s rail phase=%s name=%s enabled=%d selector=%d\n",
 			 rails[i].group, phase, rails[i].name, enabled, selector);
 	}
 }
@@ -711,11 +713,11 @@ int malibu_cpm_ufs_refclk_sample(struct device *supplier, enum malibu_cpm_ufs_re
 	ret = malibu_cpm_lpcm_request(cpm, command, queries[sample].mask,
 				     MALIBU_CPM_CLOCK_TIMEOUT_MS, &reply);
 	if (ret) {
-		dev_info(supplier, "ufs-uic-v37 %s phase=%s transport=%d\n",
+		dev_info(supplier, "ufs-uic-v38 %s phase=%s transport=%d\n",
 			 queries[sample].name, phase, ret);
 		return ret;
 	}
-	dev_info(supplier, "ufs-uic-v37 %s phase=%s firmware=%d\n",
+	dev_info(supplier, "ufs-uic-v38 %s phase=%s firmware=%d\n",
 		 queries[sample].name, phase, reply);
 	return reply == 0 || reply == 1 ? 0 : -EPROTO;
 }
@@ -732,10 +734,10 @@ static int malibu_cpm_clock_gate(struct malibu_cpm_clock *clock, unsigned int op
 	if (clock->cpm->trace_ufs_psm && clock->domain == MALIBU_CPM_HSIOS_DOMAIN &&
 	    !clock->resource) {
 		if (ret)
-			dev_info(clock->cpm->dev, "ufs-uic-v37 GPIO REFCLK op=%u transport=%d\n",
+			dev_info(clock->cpm->dev, "ufs-uic-v38 GPIO REFCLK op=%u transport=%d\n",
 				 op, ret);
 		else
-			dev_info(clock->cpm->dev, "ufs-uic-v37 GPIO REFCLK op=%u firmware=%d\n",
+			dev_info(clock->cpm->dev, "ufs-uic-v38 GPIO REFCLK op=%u firmware=%d\n",
 				 op, reply);
 	}
 	if (ret)
@@ -980,7 +982,7 @@ static void malibu_mbfs_log_ufs_vote(struct malibu_cpm_domain *domain,
 {
 	if (domain->id == MALIBU_MBFS_UFS_PREP_ID || domain->id == MALIBU_MBFS_UFS_CORE_ID ||
 	    (domain->id == MALIBU_MBFS_HSIOS_ID && domain->cpm->trace_ufs_psm))
-		dev_info(domain->cpm->dev, "ufs-uic-v37 domain=%s vote=%s ret=%d\n",
+		dev_info(domain->cpm->dev, "ufs-uic-v38 domain=%s vote=%s ret=%d\n",
 			 domain->genpd.name, source, ret);
 }
 
@@ -1025,7 +1027,7 @@ out:
 		if (!ret)
 			malibu_ufs_log_psms(cpm->dev, "hsios-power-after", &after);
 		else
-			dev_info(cpm->dev, "ufs-uic-v37 hsios-power-after PSM skipped ret=%d\n",
+			dev_info(cpm->dev, "ufs-uic-v38 hsios-power-after PSM skipped ret=%d\n",
 				 ret);
 	}
 	malibu_mbfs_log_ufs_vote(domain, source, ret);
@@ -1256,28 +1258,27 @@ static int malibu_cpm_get_channel(struct mbox_client *client, const char *name,
 	return ret;
 }
 
-static void malibu_cpm_ufs_cfg_sample(struct malibu_cpm *cpm, void __iomem *acg, const char *phase)
+static void malibu_cpm_log_ufs_psms(struct malibu_cpm *cpm, const char *phase)
 {
 	struct malibu_ufs_psm_sample sample;
-	u32 raw;
 
 	malibu_ufs_sample_psms(&cpm->ufs_psm, &sample);
 	malibu_ufs_log_psms(cpm->dev, phase, &sample);
-	if (!acg || !sample.children_valid || sample.hc != 0x10 || sample.phy != 0x11) {
-		dev_info(cpm->dev, "ufs-uic-v37 %s UFS CFG ACG skipped\n", phase);
+}
+
+static void malibu_cpm_observe_ufs(struct work_struct *work)
+{
+	struct malibu_cpm *cpm = container_of(to_delayed_work(work), struct malibu_cpm,
+					     ufs_observe_work);
+
+	if (cpm->ufs_observe_late) {
+		malibu_cpm_log_ufs_psms(cpm, "cpm-observe-20s");
 		return;
 	}
 
-	/* D1 DBL reads this word before triggering the UFS power transition. */
-	dev_info(cpm->dev, "ufs-uic-v37 %s reading UFS CFG ACG at %#x\n",
-		 phase, MALIBU_D1_UFS_CFG_ACG);
-	raw = readl(acg);
-	if (raw == U32_MAX)
-		dev_info(cpm->dev, "ufs-uic-v37 %s UFS CFG ACG raw=%#x status=unknown\n",
-			 phase, raw);
-	else
-		dev_info(cpm->dev, "ufs-uic-v37 %s UFS CFG ACG raw=%#x bit0=%d\n",
-			 phase, raw, !!(raw & BIT(0)));
+	malibu_cpm_log_ufs_psms(cpm, "cpm-observe-2s");
+	cpm->ufs_observe_late = true;
+	schedule_delayed_work(&cpm->ufs_observe_work, msecs_to_jiffies(18000));
 }
 
 static int malibu_cpm_probe(struct platform_device *pdev)
@@ -1285,7 +1286,6 @@ static int malibu_cpm_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	unsigned long remaining = msecs_to_jiffies(MALIBU_CPM_CLOCK_TIMEOUT_MS);
 	struct mbox_chan *rx;
-	void __iomem *ufs_cfg_acg = NULL;
 	struct malibu_cpm *cpm;
 	int ret;
 
@@ -1313,10 +1313,8 @@ static int malibu_cpm_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret, "failed to get CPM request channel\n");
 
 	cpm->trace_ufs_psm = malibu_ufs_map_psms(dev, &cpm->ufs_psm);
-	if (cpm->trace_ufs_psm) {
-		ufs_cfg_acg = devm_ioremap(dev, MALIBU_D1_UFS_CFG_ACG, sizeof(u32));
-		malibu_cpm_ufs_cfg_sample(cpm, ufs_cfg_acg, "cpm-before-handshake");
-	}
+	if (cpm->trace_ufs_psm)
+		malibu_cpm_log_ufs_psms(cpm, "cpm-before-handshake");
 
 	/* The startup frame completes at TX retirement. */
 	cpm->frame[0] = MALIBU_CPM_RESET_FRAME;
@@ -1324,7 +1322,7 @@ static int malibu_cpm_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "CPM mailbox handshake failed\n");
 	if (cpm->trace_ufs_psm)
-		malibu_cpm_ufs_cfg_sample(cpm, ufs_cfg_acg, "cpm-after-handshake");
+		malibu_cpm_log_ufs_psms(cpm, "cpm-after-handshake");
 	scoped_guard(spinlock_irqsave, &cpm->response_lock)
 		cpm->running = true;
 
@@ -1352,6 +1350,15 @@ static int malibu_cpm_probe(struct platform_device *pdev)
 	if (ret)
 		dev_warn(dev, "UFS regulator service unavailable: %pe\n", ERR_PTR(ret));
 	platform_set_drvdata(pdev, cpm);
+	if (cpm->trace_ufs_psm && !IS_ENABLED(CONFIG_SCSI_UFS_MALIBU)) {
+		ret = devm_delayed_work_autocancel(dev, &cpm->ufs_observe_work,
+						  malibu_cpm_observe_ufs);
+		if (ret)
+			dev_warn(dev, "ufs-uic-v38 failed to register delayed PSM samples: %pe\n",
+				 ERR_PTR(ret));
+		else
+			schedule_delayed_work(&cpm->ufs_observe_work, msecs_to_jiffies(2000));
+	}
 	return 0;
 }
 
