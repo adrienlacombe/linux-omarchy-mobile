@@ -184,13 +184,13 @@ int ufs_malibu_phy_wait_power(struct device *dev, struct ufs_malibu_phy *phy,
 					 top_status & MALIBU_UFS_TOP_POWER_READY, 10, 400);
 
 	/* Print the saved samples after polling to avoid delaying the TOP wait. */
-	dev_info(dev, "ufs-uic-v26 phase=%s PHY PSM final raw=0x%08x state=%#x ret=%d\n",
+	dev_info(dev, "ufs-uic-v27 phase=%s PHY PSM final raw=0x%08x state=%#x ret=%d\n",
 		 phase, psm_status, (u32)(psm_status & MALIBU_UFS_PSM_STATE), psm_ret);
 	if (psm_ret)
-		dev_info(dev, "ufs-uic-v26 phase=%s TOP bit 4 skipped after PHY PSM ret=%d\n",
+		dev_info(dev, "ufs-uic-v27 phase=%s TOP bit 4 skipped after PHY PSM ret=%d\n",
 			 phase, psm_ret);
 	else
-		dev_info(dev, "ufs-uic-v26 phase=%s TOP bit 4 final raw=0x%08x ready=%d ret=%d\n",
+		dev_info(dev, "ufs-uic-v27 phase=%s TOP bit 4 final raw=0x%08x ready=%d ret=%d\n",
 			 phase, top_status, !!(top_status & MALIBU_UFS_TOP_POWER_READY), ret);
 
 	return ret;
@@ -321,7 +321,7 @@ int ufs_malibu_phy_init(struct ufs_hba *hba, struct ufs_malibu_phy *phy)
 	}
 
 assert_reset:
-	dev_info(hba->dev, "ufs-uic-v26 PHY init result before reset rollback: %d\n", ret);
+	dev_info(hba->dev, "ufs-uic-v27 PHY init result before reset rollback: %d\n", ret);
 	reset_ret = reset_control_assert(phy->reset);
 	if (reset_ret)
 		dev_err(hba->dev, "failed to reassert M-PHY reset: %d\n", reset_ret);
