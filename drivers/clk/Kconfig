@@ -117,6 +117,16 @@ config COMMON_CLK_GOOGLE_MALIBU_CPM
 	  The driver uses paired MBA queues to exchange messages with
 	  CPM firmware.
 
+config COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_VOTE_DIAG
+	bool "Grizzly UFS initial power vote diagnostic"
+	depends on COMMON_CLK_GOOGLE_MALIBU_CPM && !SCSI_UFS_MALIBU
+	help
+	  On Grizzly, sample UFS power status while the provider checks
+	  and, if needed, raises the initial HSIO-S, UFS prep and UFS
+	  core votes. Hold the acknowledged domains on until reboot.
+	  This is for attended diagnostics with the UFS driver disabled.
+	  Leave disabled in normal kernels.
+
 config COMMON_CLK_SCMI
 	tristate "Clock driver controlled via SCMI interface"
 	depends on ARM_SCMI_PROTOCOL || COMPILE_TEST

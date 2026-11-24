@@ -986,6 +986,32 @@ static void malibu_mbfs_log_ufs_vote(struct malibu_cpm_domain *domain,
 			 domain->genpd.name, source, ret);
 }
 
+static int malibu_mbfs_lazy_on(struct malibu_cpm_domain *domain, const char **source)
+{
+	struct malibu_cpm *cpm = domain->cpm;
+	bool on;
+	int ret;
+
+	/* Leave domains inherited from the bootloader in their original state. */
+	*source = "lookup-error";
+	ret = malibu_mbfs_lookup(cpm, cpm->mbfs_root, domain->genpd.name, &domain->handle);
+	if (ret)
+		return ret;
+	*source = "read-error";
+	ret = malibu_mbfs_read_domain(domain, &on);
+	if (ret)
+		return ret;
+	*source = "inherited";
+	if (on)
+		return 0;
+
+	ret = malibu_mbfs_set_domain(domain, true);
+	if (!ret)
+		domain->powered_here = true;
+	*source = ret ? "request-error" : "issued";
+	return ret;
+}
+
 static int malibu_mbfs_power_on(struct generic_pm_domain *genpd)
 {
 	struct malibu_cpm_domain *domain = container_of(genpd, struct malibu_cpm_domain, genpd);
@@ -993,7 +1019,6 @@ static int malibu_mbfs_power_on(struct generic_pm_domain *genpd)
 	struct malibu_ufs_psm_sample before, after;
 	bool trace_hsios = domain->id == MALIBU_MBFS_HSIOS_ID && cpm->trace_ufs_psm;
 	const char *source;
-	bool on;
 	int ret;
 
 	if (!domain->lazy)
@@ -1001,25 +1026,7 @@ static int malibu_mbfs_power_on(struct generic_pm_domain *genpd)
 
 	if (trace_hsios)
 		malibu_ufs_sample_psms(&cpm->ufs_psm, &before);
-
-	/* Leave domains inherited from the bootloader in their original state. */
-	source = "lookup-error";
-	ret = malibu_mbfs_lookup(cpm, cpm->mbfs_root, genpd->name, &domain->handle);
-	if (ret)
-		goto out;
-	source = "read-error";
-	ret = malibu_mbfs_read_domain(domain, &on);
-	if (ret)
-		goto out;
-	source = "inherited";
-	if (on)
-		goto out;
-
-	ret = malibu_mbfs_set_domain(domain, true);
-	if (!ret)
-		domain->powered_here = true;
-	source = ret ? "request-error" : "issued";
-out:
+	ret = malibu_mbfs_lazy_on(domain, &source);
 	if (trace_hsios) {
 		if (!ret)
 			malibu_ufs_sample_psms(&cpm->ufs_psm, &after);
@@ -1031,6 +1038,33 @@ out:
 				 ret);
 	}
 	malibu_mbfs_log_ufs_vote(domain, source, ret);
+	return ret;
+}
+
+static int malibu_mbfs_initial_ufs_vote(struct malibu_cpm_domain *domain)
+{
+	struct malibu_cpm *cpm = domain->cpm;
+	struct malibu_ufs_psm_sample sample;
+	const char *name = domain->genpd.name;
+	const char *source;
+	char phase[64];
+	int ret;
+
+	malibu_ufs_sample_psms(&cpm->ufs_psm, &sample);
+	snprintf(phase, sizeof(phase), "v39-initial-before domain=%s", name);
+	malibu_ufs_log_psms(cpm->dev, phase, &sample);
+	if (domain->id != MALIBU_MBFS_HSIOS_ID && !sample.children_valid) {
+		dev_info(cpm->dev, "ufs-uic-v39 domain=%s vote=skipped wrapper-off\n", name);
+		return -EHOSTDOWN;
+	}
+
+	ret = malibu_mbfs_lazy_on(domain, &source);
+	dev_info(cpm->dev, "ufs-uic-v39 domain=%s initial-vote=%s ret=%d\n", name, source, ret);
+	if (!ret) {
+		malibu_ufs_sample_psms(&cpm->ufs_psm, &sample);
+		snprintf(phase, sizeof(phase), "v39-initial-after domain=%s", name);
+		malibu_ufs_log_psms(cpm->dev, phase, &sample);
+	}
 	return ret;
 }
 
@@ -1098,6 +1132,8 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 	};
 	struct device *dev = cpm->dev;
 	struct malibu_cpm_domains *provider;
+	bool initial_ufs_votes = IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_VOTE_DIAG) &&
+				 cpm->trace_ufs_psm;
 	bool initially_on[MALIBU_MBFS_DOMAIN_COUNT];
 	unsigned int i;
 	int ret;
@@ -1120,6 +1156,7 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 		domain->cpm = cpm;
 		domain->id = domains[i].id;
 		domain->lazy = domains[i].lazy;
+		domain->genpd.name = domains[i].name;
 		/* Optional domains perform their first lookup at power-on. */
 		initially_on[i] = false;
 		if (!domain->lazy) {
@@ -1130,15 +1167,27 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 			ret = malibu_mbfs_read_domain(domain, &initially_on[i]);
 			if (ret)
 				return ret;
+		} else if (initial_ufs_votes &&
+			   (i == MALIBU_CPM_PD_HSIOS || i == MALIBU_CPM_PD_UFS_PREP ||
+			    i == MALIBU_CPM_PD_UFS)) {
+			ret = malibu_mbfs_initial_ufs_vote(domain);
+			if (ret) {
+				dev_warn(dev, "ufs-uic-v39 initial vote sequence stopped at %s: %pe\n",
+					 domain->genpd.name, ERR_PTR(ret));
+				initial_ufs_votes = false;
+			} else {
+				initially_on[i] = true;
+				/* Keep idle genpd work from adding an OFF to this trial. */
+				domain->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
+			}
 		}
 		if (parent != MALIBU_MBFS_NO_PARENT && initially_on[i] && !initially_on[parent])
 			return -EPROTO;
 
-		domain->genpd.name = domains[i].name;
 		domain->genpd.power_on = malibu_mbfs_power_on;
 		domain->genpd.power_off = malibu_mbfs_power_off;
 		if (domains[i].active_wakeup)
-			domain->genpd.flags = GENPD_FLAG_ACTIVE_WAKEUP;
+			domain->genpd.flags |= GENPD_FLAG_ACTIVE_WAKEUP;
 		ret = pm_genpd_init(&domain->genpd, NULL, !initially_on[i]);
 		if (ret)
 			return ret;
