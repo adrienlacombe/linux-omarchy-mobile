@@ -525,7 +525,7 @@ void malibu_cpm_ufs_log_rails(struct device *supplier, const char *phase)
 	guard(device)(supplier);
 	cpm = dev_get_drvdata(supplier);
 	if (supplier->driver != &malibu_cpm_driver.driver || !cpm) {
-		dev_info(supplier, "ufs-uic-v35 rails phase=%s unavailable ret=%d\n",
+		dev_info(supplier, "ufs-uic-v36 rails phase=%s unavailable ret=%d\n",
 			 phase, -EPROBE_DEFER);
 		return;
 	}
@@ -535,7 +535,7 @@ void malibu_cpm_ufs_log_rails(struct device *supplier, const char *phase)
 		int enabled = malibu_cpm_rail_state(cpm, rails[i].id);
 		int selector = malibu_cpm_rail_selector(cpm, rails[i].id);
 
-		dev_info(supplier, "ufs-uic-v35 %s rail phase=%s name=%s enabled=%d selector=%d\n",
+		dev_info(supplier, "ufs-uic-v36 %s rail phase=%s name=%s enabled=%d selector=%d\n",
 			 rails[i].group, phase, rails[i].name, enabled, selector);
 	}
 }
@@ -680,6 +680,46 @@ static u32 malibu_cpm_command(u8 service, u8 domain, u8 resource, u8 op)
 	return ((u32)op << 24) | ((u32)resource << 16) | ((u32)domain << 8) | service;
 }
 
+int malibu_cpm_ufs_refclk_sample(struct device *supplier, enum malibu_cpm_ufs_refclk_sample sample,
+				const char *phase)
+{
+	static const struct {
+		const char *name;
+		u8 selector;
+		u32 mask;
+	} queries[] = {
+		[MALIBU_CPM_UFS_GPIO_REFCLK_GATE] = { "GPIO REFCLK gate", 0, BIT(0) },
+		[MALIBU_CPM_UFS_GPIO_REFCLK_ACG] = { "GPIO REFCLK ACG bit", 0, BIT(1) },
+		[MALIBU_CPM_UFS_MPHY_REFCLK_GATE] = { "M-PHY REFCLK gate", 1, BIT(0) },
+	};
+	struct malibu_cpm *cpm;
+	u32 command;
+	s32 reply;
+	int ret;
+
+	if ((unsigned int)sample >= ARRAY_SIZE(queries))
+		return -EINVAL;
+	guard(device)(supplier);
+	cpm = dev_get_drvdata(supplier);
+	if (!cpm)
+		return -ENODEV;
+
+	/* D1 clock op 2 compares the selected status bits with the request mask. */
+	command = malibu_cpm_command(MALIBU_CPM_CLOCK_SERVICE, MALIBU_CPM_HSIOS_DOMAIN,
+				     queries[sample].selector, 2);
+	ret = malibu_cpm_lpcm_request(cpm, command, queries[sample].mask,
+				     MALIBU_CPM_CLOCK_TIMEOUT_MS, &reply);
+	if (ret) {
+		dev_info(supplier, "ufs-uic-v36 %s phase=%s transport=%d\n",
+			 queries[sample].name, phase, ret);
+		return ret;
+	}
+	dev_info(supplier, "ufs-uic-v36 %s phase=%s firmware=%d\n",
+		 queries[sample].name, phase, reply);
+	return reply == 0 || reply == 1 ? 0 : -EPROTO;
+}
+EXPORT_SYMBOL_GPL(malibu_cpm_ufs_refclk_sample);
+
 static int malibu_cpm_clock_gate(struct malibu_cpm_clock *clock, unsigned int op)
 {
 	u32 command = malibu_cpm_command(MALIBU_CPM_CLOCK_SERVICE, clock->domain,
@@ -688,6 +728,15 @@ static int malibu_cpm_clock_gate(struct malibu_cpm_clock *clock, unsigned int op
 	int ret;
 
 	ret = malibu_cpm_lpcm_request(clock->cpm, command, 1, MALIBU_CPM_CLOCK_TIMEOUT_MS, &reply);
+	if (clock->cpm->trace_ufs_psm && clock->domain == MALIBU_CPM_HSIOS_DOMAIN &&
+	    !clock->resource) {
+		if (ret)
+			dev_info(clock->cpm->dev, "ufs-uic-v36 GPIO REFCLK op=%u transport=%d\n",
+				 op, ret);
+		else
+			dev_info(clock->cpm->dev, "ufs-uic-v36 GPIO REFCLK op=%u firmware=%d\n",
+				 op, reply);
+	}
 	if (ret)
 		return ret;
 	return malibu_cpm_translate_error(reply, true);
@@ -930,7 +979,7 @@ static void malibu_mbfs_log_ufs_vote(struct malibu_cpm_domain *domain,
 {
 	if (domain->id == MALIBU_MBFS_UFS_PREP_ID || domain->id == MALIBU_MBFS_UFS_CORE_ID ||
 	    (domain->id == MALIBU_MBFS_HSIOS_ID && domain->cpm->trace_ufs_psm))
-		dev_info(domain->cpm->dev, "ufs-uic-v35 domain=%s vote=%s ret=%d\n",
+		dev_info(domain->cpm->dev, "ufs-uic-v36 domain=%s vote=%s ret=%d\n",
 			 domain->genpd.name, source, ret);
 }
 
@@ -975,7 +1024,7 @@ out:
 		if (!ret)
 			malibu_ufs_log_psms(cpm->dev, "hsios-power-after", &after);
 		else
-			dev_info(cpm->dev, "ufs-uic-v35 hsios-power-after PSM skipped ret=%d\n",
+			dev_info(cpm->dev, "ufs-uic-v36 hsios-power-after PSM skipped ret=%d\n",
 				 ret);
 	}
 	malibu_mbfs_log_ufs_vote(domain, source, ret);

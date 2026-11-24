@@ -388,9 +388,9 @@ static void ufs_malibu_log_setup_psms(struct device *dev,
 	for (unsigned int i = 0; i < count; i++) {
 		const struct malibu_ufs_setup_sample *sample = &samples[i];
 
-		dev_info(dev, "ufs-uic-v35 setup %s PSM before HC=0x%08x PHY=0x%08x\n",
+		dev_info(dev, "ufs-uic-v36 setup %s PSM before HC=0x%08x PHY=0x%08x\n",
 			 sample->phase, sample->before.hci, sample->before.phy);
-		dev_info(dev, "ufs-uic-v35 setup %s PSM after HC=0x%08x PHY=0x%08x ret=%d\n",
+		dev_info(dev, "ufs-uic-v36 setup %s PSM after HC=0x%08x PHY=0x%08x ret=%d\n",
 			 sample->phase, sample->after.hci, sample->after.phy, sample->ret);
 	}
 }
@@ -422,7 +422,7 @@ static void ufs_malibu_log_vote_psm(struct device *dev, const char *domain, cons
 
 	if (!sample->ap.children_valid) {
 		dev_info(dev,
-			 "ufs-uic-v35 %s PSM %s HSIOS=0x%08x child PSMs skipped ret=%d PSM3_eq_1=unknown vote_ret=%d\n",
+			 "ufs-uic-v36 %s PSM %s HSIOS=0x%08x child PSMs skipped ret=%d PSM3_eq_1=unknown vote_ret=%d\n",
 			 domain, when, sample->ap.hsios, sample->psm3.ret, vote_ret);
 		return;
 	}
@@ -433,7 +433,7 @@ static void ufs_malibu_log_vote_psm(struct device *dev, const char *domain, cons
 		psm3_eq_1 = (sample->psm3.raw & MALIBU_LPCM8_PSM_STATE) ==
 			MALIBU_LPCM8_CORE_OFF_PSM3_STATE ? "yes" : "no";
 	dev_info(dev,
-		 "ufs-uic-v35 %s PSM %s HC=0x%08x PHY=0x%08x LPCM8 header=0x%08x PSM1 [%s] PSM3 [%s] PSM3_eq_1=%s vote_ret=%d\n",
+		 "ufs-uic-v36 %s PSM %s HC=0x%08x PHY=0x%08x LPCM8 header=0x%08x PSM1 [%s] PSM3 [%s] PSM3_eq_1=%s vote_ret=%d\n",
 		 domain, when, sample->ap.hc, sample->ap.phy, sample->lpcm_header,
 		 psm1, psm3, psm3_eq_1, vote_ret);
 }
@@ -453,30 +453,31 @@ static bool ufs_malibu_log_phy_reset_ack(struct device *dev,
 	u32 raw;
 
 	if (!regs->ap.hsios || !regs->phy_reset_ack) {
-		dev_info(dev, "ufs-uic-v35 PHY reset ack skipped: mapping unavailable\n");
+		dev_info(dev, "ufs-uic-v36 PHY reset ack skipped: mapping unavailable\n");
 		return false;
 	}
 	malibu_ufs_sample_psms(&regs->ap, &sample);
 	if (!sample.children_valid || sample.hc != MALIBU_UFS_PSM_ON ||
 	    sample.phy != MALIBU_UFS_PSM_OFF) {
-		dev_info(dev, "ufs-uic-v35 PHY reset ack skipped: HSIOS=%#x HC=%#x PHY=%#x\n",
+		dev_info(dev, "ufs-uic-v36 PHY reset ack skipped: HSIOS=%#x HC=%#x PHY=%#x\n",
 			 sample.hsios, sample.hc, sample.phy);
 		return false;
 	}
 
 	/* D1 DBL polls this status word when changing UfsPhyReset. */
-	dev_info(dev, "ufs-uic-v35 reading PHY reset ack at %#x\n", MALIBU_LPCM8_D1_PHY_RESET_ACK);
+	dev_info(dev, "ufs-uic-v36 reading PHY reset ack at %#x\n", MALIBU_LPCM8_D1_PHY_RESET_ACK);
 	raw = readl(regs->phy_reset_ack);
 	if (raw == U32_MAX) {
-		dev_info(dev, "ufs-uic-v35 PHY reset ack raw=%#x status=unknown\n", raw);
+		dev_info(dev, "ufs-uic-v36 PHY reset ack raw=%#x status=unknown\n", raw);
 		return false;
 	}
-	dev_info(dev, "ufs-uic-v35 PHY reset ack raw=%#x released=%d\n",
+	dev_info(dev, "ufs-uic-v36 PHY reset ack raw=%#x released=%d\n",
 		 raw, !!(raw & MALIBU_LPCM8_PHY_RESET_RELEASED));
 	return raw & MALIBU_LPCM8_PHY_RESET_RELEASED;
 }
 
 static int ufs_malibu_check_device_on_after_timeout(struct ufs_malibu *ufs,
+						    struct device *cpm,
 						    const struct malibu_ufs_psm_regs *regs)
 {
 	struct device *dev = ufs->device.dev;
@@ -489,12 +490,24 @@ static int ufs_malibu_check_device_on_after_timeout(struct ufs_malibu *ufs,
 	    sample.phy != MALIBU_UFS_PSM_OFF)
 		return -EAGAIN;
 
+	ret = malibu_cpm_ufs_refclk_sample(cpm, MALIBU_CPM_UFS_GPIO_REFCLK_GATE,
+					  "before-device-on");
+	if (ret)
+		return ret;
+	ret = malibu_cpm_ufs_refclk_sample(cpm, MALIBU_CPM_UFS_GPIO_REFCLK_ACG,
+					  "before-device-on");
+	if (ret)
+		return ret;
+	ret = malibu_cpm_ufs_refclk_sample(cpm, MALIBU_CPM_UFS_MPHY_REFCLK_GATE,
+					  "before-device-on");
+	if (ret)
+		return ret;
 	ret = ufs_malibu_device_prepare(&ufs->device);
-	dev_info(dev, "ufs-uic-v35 device rail prepare ret=%d\n", ret);
+	dev_info(dev, "ufs-uic-v36 device rail prepare ret=%d\n", ret);
 	if (ret)
 		return ret;
 	ret = ufs_malibu_device_on(&ufs->device, ufs->phy.hs_lss);
-	dev_info(dev, "ufs-uic-v35 device-on ret=%d\n", ret);
+	dev_info(dev, "ufs-uic-v36 device-on ret=%d\n", ret);
 	if (ret)
 		return ret;
 
@@ -506,9 +519,11 @@ static int ufs_malibu_check_device_on_after_timeout(struct ufs_malibu *ufs,
 	ret = -EAGAIN;
 	if (sample.hc == MALIBU_UFS_PSM_ON)
 		ret = ufs_malibu_phy_wait_power(dev, &ufs->phy, "after-device-on", NULL);
-	dev_info(dev, "ufs-uic-v35 device-on diagnostic result before device-off: %d\n", ret);
+	dev_info(dev, "ufs-uic-v36 device-on diagnostic result before device-off: %d\n", ret);
+	malibu_cpm_ufs_refclk_sample(cpm, MALIBU_CPM_UFS_GPIO_REFCLK_GATE, "before-device-off");
 	cleanup = ufs_malibu_device_off(&ufs->device);
-	dev_info(dev, "ufs-uic-v35 diagnostic device-off ret=%d\n", cleanup);
+	dev_info(dev, "ufs-uic-v36 diagnostic device-off ret=%d\n", cleanup);
+	malibu_cpm_ufs_refclk_sample(cpm, MALIBU_CPM_UFS_GPIO_REFCLK_GATE, "after-device-off");
 	return ret ?: cleanup;
 }
 
@@ -520,7 +535,7 @@ static void ufs_malibu_before_hci_stop(struct ufs_hba *hba, int link, int hibern
 	bool off;
 	int ret;
 
-	dev_info(hba->dev, "ufs-uic-v35 probe result before HCI stop: link=%d hibern8=%d\n",
+	dev_info(hba->dev, "ufs-uic-v36 probe result before HCI stop: link=%d hibern8=%d\n",
 		 link, hibern8);
 	if (link || hibern8)
 		return;
@@ -528,14 +543,14 @@ static void ufs_malibu_before_hci_stop(struct ufs_hba *hba, int link, int hibern
 	ret = read_poll_timeout(ufs_malibu_psms_off, off, off, 5, 10000, false,
 				ufs, &status);
 	ufs->deep_h8_release_result = ret;
-	dev_info(hba->dev, "ufs-uic-v35 Deep H8 gate: HC=%#x PHY=%#x ret=%d\n",
+	dev_info(hba->dev, "ufs-uic-v36 Deep H8 gate: HC=%#x PHY=%#x ret=%d\n",
 		 status.hci, status.phy, ret);
 	if (ret)
 		return;
 
 	/* Keep the core clock, domains and device powered for this LPCM request. */
 	clk_unprepare(ufs->deep_h8);
-	dev_info(hba->dev, "ufs-uic-v35 Deep H8 unprepare returned\n");
+	dev_info(hba->dev, "ufs-uic-v36 Deep H8 unprepare returned\n");
 }
 
 static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
@@ -644,12 +659,12 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	ret = ufs_malibu_get_gpios(&ufs->device);
 	if (ret) {
 		ufs_malibu_finish_setup_sample(ufs, &setup[setup_count++], "gpio-setup", ret);
-		dev_info(dev, "ufs-uic-v35 early GPIO acquisition ret=%d\n", ret);
+		dev_info(dev, "ufs-uic-v36 early GPIO acquisition ret=%d\n", ret);
 		goto put_cpm;
 	}
 	ret = ufs_malibu_device_init_gpios(&ufs->device);
 	ufs_malibu_finish_setup_sample(ufs, &setup[setup_count++], "gpio-setup", ret);
-	dev_info(dev, "ufs-uic-v35 early GPIO output-low ret=%d\n", ret);
+	dev_info(dev, "ufs-uic-v36 early GPIO output-low ret=%d\n", ret);
 	if (ret)
 		goto put_cpm;
 
@@ -674,7 +689,7 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	ufs_malibu_read_psms(ufs, &setup[setup_count].before);
 	ret = malibu_cpm_ufs_decouple_enable(cpm);
 	ufs_malibu_finish_setup_sample(ufs, &setup[setup_count++], phase, ret);
-	dev_info(dev, "ufs-uic-v35 early PMIC decouple ret=%d\n", ret);
+	dev_info(dev, "ufs-uic-v36 early PMIC decouple ret=%d\n", ret);
 	if (ret)
 		goto hold;
 	phase = "prep-domain";
@@ -710,7 +725,7 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	malibu_cpm_ufs_log_rails(cpm, core_ret < 0 ? "after-core-error" : "after-core-poll");
 	if (phy_timed_out && phy_reset_released) {
 		phase = "device-on-after-phy-timeout";
-		ret = ufs_malibu_check_device_on_after_timeout(ufs, &vote_regs.ap);
+		ret = ufs_malibu_check_device_on_after_timeout(ufs, cpm, &vote_regs.ap);
 		/* This fallback ends before HCI access, even when the PHY responds. */
 		goto hold;
 	}
@@ -763,7 +778,7 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 log_prep_failure:
 	ufs_malibu_log_vote_psms(dev, "prep", &before_prep, &after_prep, prep_ret);
 hold:
-	dev_info(dev, "ufs-uic-v35 probe phase=%s ret=%d; retaining remaining UFS votes\n",
+	dev_info(dev, "ufs-uic-v36 probe phase=%s ret=%d; retaining remaining UFS votes\n",
 		 phase, ret);
 put_cpm:
 	ufs_malibu_log_setup_psms(dev, setup, setup_count);
@@ -792,12 +807,12 @@ static int ufs_malibu_probe(struct platform_device *pdev)
 		devres_remove_group(dev, group);
 		return 0;
 	}
-	dev_info(dev, "ufs-uic-v35 probe result before devres release: %d\n", ret);
+	dev_info(dev, "ufs-uic-v36 probe result before devres release: %d\n", ret);
 	devres_release_group(dev, group);
 	if (ret)
 		return dev_err_probe(dev, ret, "UFS link diagnostic failed\n");
 
-	dev_info(dev, "ufs-uic-v35 UFS link, HCI IRQ and Hibern8 verified; release sequence finished\n");
+	dev_info(dev, "ufs-uic-v36 UFS link, HCI IRQ and Hibern8 verified; release sequence finished\n");
 	return 0;
 }
 
