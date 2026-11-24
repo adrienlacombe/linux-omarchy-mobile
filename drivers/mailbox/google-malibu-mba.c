@@ -188,7 +188,7 @@ static int malibu_mba_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct resource *res;
 	struct malibu_mba *mba;
-	u32 words;
+	u32 pending, words;
 	int ret;
 
 	mba = devm_kzalloc(dev, sizeof(*mba), GFP_KERNEL);
@@ -210,6 +210,14 @@ static int malibu_mba_probe(struct platform_device *pdev)
 	mba->irq = platform_get_irq(pdev, 0);
 	if (mba->irq < 0)
 		return mba->irq;
+	/* Match the firmware handoff before the queue is available to clients. */
+	pending = readl(mba->base + MALIBU_MBA_IRQ_STATUS);
+	pending &= MALIBU_MBA_RX_IRQ | MALIBU_MBA_TX_IRQ;
+	if (pending) {
+		writel(pending, mba->base + MALIBU_MBA_IRQ_STATUS);
+		dev_info(dev, "mailbox probe acknowledged IRQ status %#x\n", pending);
+	}
+
 	ret = devm_request_irq(dev, mba->irq, malibu_mba_irq, IRQF_NO_AUTOEN, dev_name(dev), mba);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to request mailbox IRQ\n");
