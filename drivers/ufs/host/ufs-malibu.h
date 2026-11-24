@@ -39,6 +39,7 @@ struct ufs_malibu_device {
 	struct pinctrl_state *refclk_off;
 	enum malibu_device_stage stage;
 	bool lss_active;
+	bool gpios_prepared;
 	bool prepared;
 };
 
@@ -50,7 +51,8 @@ struct ufs_malibu {
 	int deep_h8_release_result;
 };
 
-int ufs_malibu_device_prepare(struct ufs_malibu_device *device, struct device *cpm);
+int ufs_malibu_device_init_gpios(struct ufs_malibu_device *device);
+int ufs_malibu_device_prepare(struct ufs_malibu_device *device);
 int ufs_malibu_device_on(struct ufs_malibu_device *device, bool hs_lss);
 int ufs_malibu_device_off(struct ufs_malibu_device *device);
 

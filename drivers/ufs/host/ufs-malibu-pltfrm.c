@@ -212,9 +212,8 @@ static int ufs_malibu_get_supplies(struct ufs_malibu_device *device)
 	return PTR_ERR_OR_ZERO(device->refclk_off);
 }
 
-static int ufs_malibu_get_gpios(struct ufs_malibu *ufs)
+static int ufs_malibu_get_gpios(struct ufs_malibu_device *device)
 {
-	struct ufs_malibu_device *device = &ufs->device;
 	struct device *dev = device->dev;
 
 	device->reset = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
@@ -223,9 +222,6 @@ static int ufs_malibu_get_gpios(struct ufs_malibu *ufs)
 	device->power = devm_gpiod_get(dev, "power", GPIOD_ASIS);
 	if (IS_ERR(device->power))
 		return PTR_ERR(device->power);
-	if (!ufs->phy.hs_lss)
-		return 0;
-
 	device->lss = devm_gpiod_get(dev, "lss", GPIOD_ASIS);
 	return PTR_ERR_OR_ZERO(device->lss);
 }
@@ -279,7 +275,7 @@ static void ufs_malibu_before_hci_stop(struct ufs_hba *hba, int link, int hibern
 	bool off;
 	int ret;
 
-	dev_info(hba->dev, "ufs-uic-v24 probe result before HCI stop: link=%d hibern8=%d\n",
+	dev_info(hba->dev, "ufs-uic-v25 probe result before HCI stop: link=%d hibern8=%d\n",
 		 link, hibern8);
 	if (link || hibern8)
 		return;
@@ -287,14 +283,14 @@ static void ufs_malibu_before_hci_stop(struct ufs_hba *hba, int link, int hibern
 	ret = read_poll_timeout(ufs_malibu_psms_off, off, off, 5, 10000, false,
 				ufs, &status);
 	ufs->deep_h8_release_result = ret;
-	dev_info(hba->dev, "ufs-uic-v24 Deep H8 gate: HC=%#x PHY=%#x ret=%d\n",
+	dev_info(hba->dev, "ufs-uic-v25 Deep H8 gate: HC=%#x PHY=%#x ret=%d\n",
 		 status.hci, status.phy, ret);
 	if (ret)
 		return;
 
 	/* Keep the core clock, domains and device powered for this LPCM request. */
 	clk_unprepare(ufs->deep_h8);
-	dev_info(hba->dev, "ufs-uic-v24 Deep H8 unprepare returned\n");
+	dev_info(hba->dev, "ufs-uic-v25 Deep H8 unprepare returned\n");
 }
 
 static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
@@ -381,6 +377,16 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	hba->lanes_per_direction = 2;
 	ufshcd_set_variant(hba, ufs);
 
+	ret = ufs_malibu_get_gpios(&ufs->device);
+	if (ret) {
+		dev_info(dev, "ufs-uic-v25 early GPIO acquisition ret=%d\n", ret);
+		goto put_cpm;
+	}
+	ret = ufs_malibu_device_init_gpios(&ufs->device);
+	dev_info(dev, "ufs-uic-v25 early GPIO output-low ret=%d\n", ret);
+	if (ret)
+		goto put_cpm;
+
 	/*
 	 * CPM gates these clocks in prepare/unprepare. Bulk prepare would
 	 * unprepare Deep H8 on a core error without qualifying Hibern8.
@@ -392,6 +398,11 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 		goto hold;
 	phase = "core-clock-prepare";
 	ret = clk_prepare(core_clk);
+	if (ret)
+		goto hold;
+	phase = "pmic-decouple";
+	ret = malibu_cpm_ufs_decouple_enable(cpm);
+	dev_info(dev, "ufs-uic-v25 early PMIC decouple ret=%d\n", ret);
 	if (ret)
 		goto hold;
 	phase = "prep-domain";
@@ -424,12 +435,8 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	ret = ufs_malibu_phy_post_power_on(dev, &ufs->phy, 0);
 	if (ret)
 		goto hold;
-	phase = "device-gpios";
-	ret = ufs_malibu_get_gpios(ufs);
-	if (ret)
-		goto hold;
 	phase = "device-rails";
-	ret = ufs_malibu_device_prepare(&ufs->device, cpm);
+	ret = ufs_malibu_device_prepare(&ufs->device);
 	if (ret)
 		goto hold;
 	phase = "device-power-on";
@@ -465,7 +472,7 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	goto put_cpm;
 
 hold:
-	dev_info(dev, "ufs-uic-v24 probe phase=%s ret=%d; retaining remaining UFS votes\n",
+	dev_info(dev, "ufs-uic-v25 probe phase=%s ret=%d; retaining remaining UFS votes\n",
 		 phase, ret);
 put_cpm:
 	put_device(cpm);
@@ -493,12 +500,12 @@ static int ufs_malibu_probe(struct platform_device *pdev)
 		devres_remove_group(dev, group);
 		return 0;
 	}
-	dev_info(dev, "ufs-uic-v24 probe result before devres release: %d\n", ret);
+	dev_info(dev, "ufs-uic-v25 probe result before devres release: %d\n", ret);
 	devres_release_group(dev, group);
 	if (ret)
 		return dev_err_probe(dev, ret, "UFS link diagnostic failed\n");
 
-	dev_info(dev, "ufs-uic-v24 UFS link, HCI IRQ and Hibern8 verified; release sequence finished\n");
+	dev_info(dev, "ufs-uic-v25 UFS link, HCI IRQ and Hibern8 verified; release sequence finished\n");
 	return 0;
 }
 

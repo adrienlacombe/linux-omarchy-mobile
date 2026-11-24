@@ -4,7 +4,6 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/gpio/consumer.h>
-#include <linux/malibu-cpm.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/regulator/consumer.h>
 
@@ -35,13 +34,40 @@ static int malibu_check_rail(struct regulator *rail, int voltage)
 	return malibu_check_voltage(rail, voltage);
 }
 
+int ufs_malibu_device_init_gpios(struct ufs_malibu_device *device)
+{
+	int ret;
+
+	if (!gpiod_is_active_low(device->reset) ||
+	    gpiod_is_active_low(device->power) || gpiod_is_active_low(device->lss))
+		return -EINVAL;
+
+	ret = pinctrl_select_state(device->pinctrl, device->gpio_prepare);
+	if (ret)
+		return ret;
+
+	/* All three outputs start physically low, with RESETB asserted. */
+	ret = gpiod_direction_output(device->reset, 1);
+	if (ret)
+		return ret;
+	ret = gpiod_direction_output(device->power, 0);
+	if (ret)
+		return ret;
+	ret = gpiod_direction_output(device->lss, 0);
+	if (!ret)
+		device->gpios_prepared = true;
+	return ret;
+}
+
 /* Call with the regulators acquired, before driving the UFS enable pin. */
-int ufs_malibu_device_prepare(struct ufs_malibu_device *device, struct device *cpm)
+int ufs_malibu_device_prepare(struct ufs_malibu_device *device)
 {
 	int ret;
 
 	if (device->stage != MALIBU_DEVICE_OFF)
 		return -EBUSY;
+	if (!device->gpios_prepared)
+		return -EIO;
 	if (device->prepared)
 		return 0;
 
@@ -57,10 +83,8 @@ int ufs_malibu_device_prepare(struct ufs_malibu_device *device, struct device *c
 	ret = regulator_set_voltage(device->vccq, MALIBU_UFS_VCCQ_UV, MALIBU_UFS_VCCQ_UV);
 	if (ret)
 		return ret;
-	ret = malibu_cpm_ufs_decouple_enable(cpm);
-	if (!ret)
-		device->prepared = true;
-	return ret;
+	device->prepared = true;
+	return 0;
 }
 
 int ufs_malibu_device_off(struct ufs_malibu_device *device)
@@ -103,15 +127,8 @@ int ufs_malibu_device_on(struct ufs_malibu_device *device, bool hs_lss)
 
 	if (device->stage == MALIBU_DEVICE_ON)
 		return 0;
-	if (device->stage != MALIBU_DEVICE_OFF || !device->prepared)
+	if (device->stage != MALIBU_DEVICE_OFF || !device->gpios_prepared || !device->prepared)
 		return -EIO;
-	if (!gpiod_is_active_low(device->reset) || gpiod_is_active_low(device->power) ||
-	    (hs_lss && (!device->lss || gpiod_is_active_low(device->lss))))
-		return -EINVAL;
-
-	ret = pinctrl_select_state(device->pinctrl, device->gpio_prepare);
-	if (ret)
-		return ret;
 
 	device->stage = MALIBU_DEVICE_PINS;
 	ret = pinctrl_select_state(device->pinctrl, device->refclk_on);
@@ -154,7 +171,7 @@ int ufs_malibu_device_on(struct ufs_malibu_device *device, bool hs_lss)
 	return 0;
 
 fail:
-	dev_info(device->dev, "ufs-uic-v24 device power result before rollback: %d\n", ret);
+	dev_info(device->dev, "ufs-uic-v25 device power result before rollback: %d\n", ret);
 	cleanup = ufs_malibu_device_off(device);
 	if (cleanup)
 		dev_err(device->dev, "UFS power sequence rollback failed: %pe\n", ERR_PTR(cleanup));
