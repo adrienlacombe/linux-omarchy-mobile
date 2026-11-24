@@ -154,7 +154,7 @@ int ufs_malibu_device_on(struct ufs_malibu_device *device, bool hs_lss)
 	return 0;
 
 fail:
-	dev_info(device->dev, "ufs-uic-v22 device power result before rollback: %d\n", ret);
+	dev_info(device->dev, "ufs-uic-v23 device power result before rollback: %d\n", ret);
 	cleanup = ufs_malibu_device_off(device);
 	if (cleanup)
 		dev_err(device->dev, "UFS power sequence rollback failed: %pe\n", ERR_PTR(cleanup));

@@ -31,8 +31,10 @@ struct ufs_malibu_phy {
 
 int ufs_malibu_phy_read_config(struct device *dev, struct ufs_malibu_phy *phy);
 int ufs_malibu_phy_prepare(struct ufs_malibu_phy *phy);
-int ufs_malibu_phy_wait_power(struct ufs_malibu_phy *phy);
-int ufs_malibu_phy_post_power_on(struct ufs_malibu_phy *phy, u32 refclk_wait_us);
+int ufs_malibu_phy_wait_power(struct device *dev, struct ufs_malibu_phy *phy,
+			      const char *phase);
+int ufs_malibu_phy_post_power_on(struct device *dev, struct ufs_malibu_phy *phy,
+				 u32 refclk_wait_us);
 void ufs_malibu_phy_restore_refclk(struct ufs_malibu_phy *phy);
 int ufs_malibu_phy_init(struct ufs_hba *hba, struct ufs_malibu_phy *phy);
 

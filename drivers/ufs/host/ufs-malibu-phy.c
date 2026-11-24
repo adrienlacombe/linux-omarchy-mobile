@@ -169,28 +169,41 @@ int ufs_malibu_phy_prepare(struct ufs_malibu_phy *phy)
 	return 0;
 }
 
-int ufs_malibu_phy_wait_power(struct ufs_malibu_phy *phy)
+int ufs_malibu_phy_wait_power(struct device *dev, struct ufs_malibu_phy *phy,
+			      const char *phase)
 {
-	u32 status;
-	int ret;
+	u32 psm_status, top_status = 0;
+	int psm_ret, ret;
 
-	ret = readl_poll_timeout(phy->psm, status,
-				 (status & MALIBU_UFS_PSM_STATE) == MALIBU_UFS_PSM_ON,
-				 10, 10000);
-	if (ret)
-		return ret;
+	psm_ret = readl_poll_timeout(phy->psm, psm_status,
+				     (psm_status & MALIBU_UFS_PSM_STATE) == MALIBU_UFS_PSM_ON,
+				     10, 10000);
+	ret = psm_ret;
+	if (!psm_ret)
+		ret = readl_poll_timeout(phy->top + MALIBU_UFS_TOP_STATUS, top_status,
+					 top_status & MALIBU_UFS_TOP_POWER_READY, 10, 400);
 
-	return readl_poll_timeout(phy->top + MALIBU_UFS_TOP_STATUS, status,
-				  status & MALIBU_UFS_TOP_POWER_READY, 10, 400);
+	/* Print the saved samples after polling to avoid delaying the TOP wait. */
+	dev_info(dev, "ufs-uic-v23 phase=%s PHY PSM final raw=0x%08x state=%#x ret=%d\n",
+		 phase, psm_status, (u32)(psm_status & MALIBU_UFS_PSM_STATE), psm_ret);
+	if (psm_ret)
+		dev_info(dev, "ufs-uic-v23 phase=%s TOP bit 4 skipped after PHY PSM ret=%d\n",
+			 phase, psm_ret);
+	else
+		dev_info(dev, "ufs-uic-v23 phase=%s TOP bit 4 final raw=0x%08x ready=%d ret=%d\n",
+			 phase, top_status, !!(top_status & MALIBU_UFS_TOP_POWER_READY), ret);
+
+	return ret;
 }
 
 /* The caller holds the core power domain; zero selects the pre-discovery delay. */
-int ufs_malibu_phy_post_power_on(struct ufs_malibu_phy *phy, u32 refclk_wait_us)
+int ufs_malibu_phy_post_power_on(struct device *dev, struct ufs_malibu_phy *phy,
+				 u32 refclk_wait_us)
 {
 	u32 status;
 	int ret;
 
-	ret = ufs_malibu_phy_wait_power(phy);
+	ret = ufs_malibu_phy_wait_power(dev, phy, "phy-refclk");
 	if (ret)
 		return ret;
 
@@ -308,7 +321,7 @@ int ufs_malibu_phy_init(struct ufs_hba *hba, struct ufs_malibu_phy *phy)
 	}
 
 assert_reset:
-	dev_info(hba->dev, "ufs-uic-v22 PHY init result before reset rollback: %d\n", ret);
+	dev_info(hba->dev, "ufs-uic-v23 PHY init result before reset rollback: %d\n", ret);
 	reset_ret = reset_control_assert(phy->reset);
 	if (reset_ret)
 		dev_err(hba->dev, "failed to reassert M-PHY reset: %d\n", reset_ret);
