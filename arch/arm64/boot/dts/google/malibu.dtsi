@@ -1,0 +1,354 @@
+// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	interrupt-parent = <&gic>;
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu-map {
+			cluster0 {
+				core0 {
+					cpu = <&cpu0>;
+				};
+
+				core1 {
+					cpu = <&cpu1>;
+				};
+			};
+
+			cluster1 {
+				core0 {
+					cpu = <&cpu2>;
+				};
+
+				core1 {
+					cpu = <&cpu3>;
+				};
+
+				core2 {
+					cpu = <&cpu4>;
+				};
+
+				core3 {
+					cpu = <&cpu5>;
+				};
+			};
+
+			cluster2 {
+				core0 {
+					cpu = <&cpu6>;
+				};
+			};
+		};
+
+		cpu0: cpu@0 {
+			compatible = "arm,c1-pro";
+			device_type = "cpu";
+			reg = <0x000>;
+			enable-method = "psci";
+		};
+
+		cpu1: cpu@100 {
+			compatible = "arm,c1-pro";
+			device_type = "cpu";
+			reg = <0x100>;
+			enable-method = "psci";
+		};
+
+		cpu2: cpu@200 {
+			compatible = "arm,c1-pro";
+			device_type = "cpu";
+			reg = <0x200>;
+			enable-method = "psci";
+		};
+
+		cpu3: cpu@300 {
+			compatible = "arm,c1-pro";
+			device_type = "cpu";
+			reg = <0x300>;
+			enable-method = "psci";
+		};
+
+		cpu4: cpu@400 {
+			compatible = "arm,c1-pro";
+			device_type = "cpu";
+			reg = <0x400>;
+			enable-method = "psci";
+		};
+
+		cpu5: cpu@500 {
+			compatible = "arm,c1-pro";
+			device_type = "cpu";
+			reg = <0x500>;
+			enable-method = "psci";
+		};
+
+		cpu6: cpu@600 {
+			compatible = "arm,c1-ultra";
+			device_type = "cpu";
+			reg = <0x600>;
+			enable-method = "psci";
+		};
+	};
+
+	gic: interrupt-controller@9228000 {
+		compatible = "arm,gic-v3";
+		reg = <0x0 0x09228000 0x0 0x10000>,
+		      <0x0 0x092a8000 0x0 0x200000>;
+		interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH 0>;
+		interrupt-controller;
+		#interrupt-cells = <4>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+	};
+
+	gtc_clk: clock-gtc {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <38400000>;
+	};
+
+	psci {
+		compatible = "arm,psci-1.0";
+		method = "smc";
+	};
+
+	/* Fixed reservations shared by the October Grizzly and Kodiak DTs. */
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		boot-metadata@543e000 {
+			reg = <0x0 0x543e000 0x0 0x2000>;
+			no-map;
+		};
+
+		xhci-dma@a810000 {
+			reg = <0x0 0xa810000 0x0 0x40000>;
+			no-map;
+		};
+
+		nvmem@ebd2000 {
+			reg = <0x0 0xebd2000 0x0 0x488>;
+			no-map;
+		};
+
+		cpu-stats@8b20f000 {
+			reg = <0x0 0x8b20f000 0x0 0x1000>;
+			no-map;
+		};
+
+		/* Keep the stock node names used by ABL fixups. */
+		coresight_trace@8b300000 {
+			reg = <0x0 0x8b300000 0x0 0x100000>;
+			no-map;
+		};
+
+		gdmc-trace@8b400000 {
+			reg = <0x0 0x8b400000 0x0 0x10000>;
+			no-map;
+		};
+
+		gdmc-mailbox@8b420000 {
+			reg = <0x0 0x8b420000 0x0 0x4000>;
+			no-map;
+		};
+
+		gdmc_metrics_dma_buffer@8b42c000 {
+			reg = <0x0 0x8b42c000 0x0 0x4000>;
+			no-map;
+		};
+
+		gvdu_dma_region@8b430000 {
+			reg = <0x0 0x8b430000 0x0 0x4000>;
+			no-map;
+		};
+
+		bl31-log@8b600000 {
+			reg = <0x0 0x8b600000 0x0 0x200000>;
+			no-map;
+		};
+
+		cpm_tracepoint_ipc_dma_buff@8cdf4000 {
+			reg = <0x0 0x8cdf4000 0x0 0x4000>;
+			no-map;
+		};
+
+		cpm_tracepoint_buff@8ce00000 {
+			reg = <0x0 0x8ce00000 0x0 0x200000>;
+			no-map;
+		};
+
+		cap_tracepoint_buff@8d000000 {
+			reg = <0x0 0x8d000000 0x0 0x200000>;
+			no-map;
+		};
+
+		vfa_tracepoint_buff@8d200000 {
+			reg = <0x0 0x8d200000 0x0 0x20000>;
+			no-map;
+		};
+
+		log_kevents@90200000 {
+			reg = <0x0 0x90200000 0x0 0x300000>;
+			no-map;
+		};
+
+		cdd-log@90700000 {
+			reg = <0x0 0x90700000 0x0 0x10000>;
+			no-map;
+		};
+
+		debug_kinfo_reserved@90714000 {
+			reg = <0x0 0x90714000 0x0 0x4000>;
+			no-map;
+		};
+
+		cdd@91200000 {
+			reg = <0x0 0x91200000 0x0 0x400000>;
+			no-map;
+		};
+
+		cdd-header@951f8000 {
+			reg = <0x0 0x951f8000 0x0 0x8000>;
+			no-map;
+		};
+
+		crash-log@95200000 {
+			reg = <0x0 0x95200000 0x0 0x400000>;
+		};
+
+		bootloader-log@95600000 {
+			reg = <0x0 0x95600000 0x0 0x100000>;
+			no-map;
+		};
+
+		xhci-dma-dram@97000000 {
+			reg = <0x0 0x97000000 0x0 0x3f4000>;
+			no-map;
+		};
+
+		xhci-dma-buffer@973f4000 {
+			reg = <0x0 0x973f4000 0x0 0xc000>;
+			no-map;
+		};
+
+		tpu-fw@a0000000 {
+			reg = <0x0 0xa0000000 0x0 0xa00000>;
+			no-map;
+		};
+
+		guest0-tpu-fw@a0a00000 {
+			reg = <0x0 0xa0a00000 0x0 0x200000>;
+		};
+
+		guest1-tpu-fw@a0c00000 {
+			reg = <0x0 0xa0c00000 0x0 0x200000>;
+		};
+
+		guest2-tpu-fw@a0e00000 {
+			reg = <0x0 0xa0e00000 0x0 0x200000>;
+		};
+
+		vpu-fw@a1000000 {
+			reg = <0x0 0xa1000000 0x0 0x100000>;
+		};
+
+		iif-wait-table@a1360000 {
+			reg = <0x0 0xa1360000 0x0 0x20000>;
+			no-map;
+		};
+
+		iif-signal-table@a1380000 {
+			reg = <0x0 0xa1380000 0x0 0x20000>;
+			no-map;
+		};
+
+		gxp-secure-data@a1400000 {
+			reg = <0x0 0xa1400000 0x0 0x900000>;
+			no-map;
+		};
+
+		gxp-fw@a1d00000 {
+			reg = <0x0 0xa1d00000 0x0 0x300000>;
+			no-map;
+		};
+
+		gxp-mcu-fw@a2000000 {
+			reg = <0x0 0xa2000000 0x0 0x400000>;
+			no-map;
+		};
+
+		gsa-gme@a2400000 {
+			reg = <0x0 0xa2400000 0x0 0x3db0000>;
+			no-map;
+		};
+
+		gsa_reserved_log@a61b0000 {
+			reg = <0x0 0xa61b0000 0x0 0x4000>;
+			no-map;
+		};
+
+		gpu-fw@b9f00000 {
+			reg = <0x0 0xb9f00000 0x0 0x2100000>;
+			no-map;
+		};
+
+		abl@be000000 {
+			reg = <0x0 0xbe000000 0x0 0x1000000>;
+			no-map;
+		};
+
+		faceauth-model@c0000000 {
+			reg = <0x0 0xc0000000 0x0 0x4b00000>;
+		};
+
+		faceauth-image@c4b00000 {
+			reg = <0x0 0xc4b00000 0x0 0x4800000>;
+		};
+
+		aoc@eb000000 {
+			reg = <0x0 0xeb000000 0x0 0x4000000>;
+			no-map;
+		};
+
+		gc-firmware@f6fce000 {
+			reg = <0x0 0xf6fce000 0x0 0x32000>;
+			no-map;
+		};
+	};
+
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_LOW 0>,
+			     <GIC_PPI 14 IRQ_TYPE_LEVEL_LOW 0>,
+			     <GIC_PPI 11 IRQ_TYPE_LEVEL_LOW 0>,
+			     <GIC_PPI 10 IRQ_TYPE_LEVEL_LOW 0>;
+	};
+
+	wdt0: watchdog@200c4000 {
+		compatible = "google,malibu-wdt";
+		reg = <0x0 0x200c4000 0x0 0x1000>;
+		clocks = <&gtc_clk>;
+		timeout-sec = <24>;
+		status = "disabled";
+	};
+
+	wdt1: watchdog@200c5000 {
+		compatible = "google,malibu-wdt";
+		reg = <0x0 0x200c5000 0x0 0x1000>;
+		clocks = <&gtc_clk>;
+		timeout-sec = <30>;
+		status = "disabled";
+	};
+};
+
+#include "malibu-usb2.dtsi"

@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/pinctrl/google,malibu-lsioe-i2c3-pinctrl.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Tensor G6 LSIOE I2C3 pad control
+
+maintainers:
+  - Peter Griffin <peter.griffin@linaro.org>
+
+description: |
+  The LSIOE pad controller multiplexes the I2C3 SCL and SDA signals onto
+  pads 25 and 26. It also supports putting the pads in a GPIO mux state
+  with input enabled and the output disabled. The I2C3 mux uses the
+  fixed pad drive setting for these pins. The bank's CSR power domain
+  supplies the register interface.
+
+allOf:
+  - $ref: pinctrl.yaml#
+
+properties:
+  compatible:
+    const: google,malibu-lsioe-i2c3-pinctrl
+
+  reg:
+    maxItems: 1
+
+  power-domains:
+    maxItems: 1
+
+  power-domain-names:
+    items:
+      - const: csr_access_pd
+
+patternProperties:
+  '^[a-z0-9][a-z0-9-]*-pins$':
+    type: object
+
+    allOf:
+      - $ref: pinmux-node.yaml#
+      - $ref: pincfg-node.yaml#
+      - if:
+          properties:
+            function:
+              const: lsioe_i2c
+        then:
+          required:
+            - bias-disable
+            - output-enable
+            - output-high
+          properties:
+            bias-pull-up: false
+            output-disable: false
+        else:
+          required:
+            - bias-pull-up
+            - output-disable
+          properties:
+            bias-disable: false
+            output-enable: false
+            output-high: false
+
+    properties:
+      pins:
+        minItems: 1
+        maxItems: 2
+        items:
+          enum:
+            - XLSIOE_I23C8_SCL
+            - XLSIOE_I23C8_SDA
+
+      function:
+        enum:
+          - lsioe_gpio
+          - lsioe_i2c
+
+      bias-disable: true
+      bias-pull-up:
+        type: boolean
+      input-enable: true
+      output-disable: true
+      output-enable: true
+      output-high: true
+
+    required:
+      - pins
+      - function
+      - input-enable
+
+    additionalProperties: false
+
+required:
+  - compatible
+  - reg
+  - power-domains
+
+unevaluatedProperties: false

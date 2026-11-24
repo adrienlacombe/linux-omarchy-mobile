@@ -1,0 +1,122 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/usb/google,malibu-dwc3.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Tensor G6 Malibu DWC3 controller wrapper
+
+maintainers:
+  - Peter Griffin <peter.griffin@linaro.org>
+
+description: |
+  The wrapper supplies the DWC3 controller's clocks and resets, including
+  the APB interface to the USB2 PHY configuration registers. This binding
+  describes a high-speed peripheral configuration with a single child.
+
+properties:
+  compatible:
+    const: google,malibu-dwc3
+
+  reg:
+    items:
+      - description: USB top register window.
+
+  clocks:
+    items:
+      - description: Non-sticky controller clock.
+      - description: Sticky controller clock.
+      - description: USB2 PHY APB clock.
+
+  clock-names:
+    items:
+      - const: non-sticky
+      - const: sticky
+      - const: usb2-apb
+
+  resets:
+    items:
+      - description: Non-sticky controller reset.
+      - description: Sticky controller reset.
+      - description: Dual-role controller bus reset.
+      - description: USB2 PHY APB reset.
+      - description: USB top configuration reset.
+
+  reset-names:
+    items:
+      - const: non-sticky
+      - const: sticky
+      - const: drd-bus
+      - const: usb2-apb
+      - const: top
+
+  power-domains:
+    items:
+      - description: USB controller power switch domain.
+      - description: USB top domain.
+
+  power-domain-names:
+    items:
+      - const: psw
+      - const: top
+
+  '#address-cells':
+    const: 2
+
+  '#size-cells':
+    const: 2
+
+  ranges: true
+
+  dma-ranges: true
+
+  usb-role-switch:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description: Routes the device session to the USB2 PHY and repeater.
+
+  google,usb2-repeater:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: USB2 repeater on the path between the PHY and the connector.
+
+patternProperties:
+  '^usb@[0-9a-f]+$':
+    $ref: snps,dwc3.yaml#
+    properties:
+      compatible:
+        const: snps,dwc3
+      dr_mode:
+        const: peripheral
+      maximum-speed:
+        const: high-speed
+      phys:
+        maxItems: 1
+      phy-names:
+        items:
+          - const: usb2-phy
+      usb-role-switch: false
+    required:
+      - compatible
+      - dr_mode
+      - maximum-speed
+      - phys
+      - phy-names
+      - iommus
+
+required:
+  - compatible
+  - reg
+  - clocks
+  - clock-names
+  - resets
+  - reset-names
+  - power-domains
+  - power-domain-names
+  - '#address-cells'
+  - '#size-cells'
+  - ranges
+
+dependencies:
+  usb-role-switch: ["google,usb2-repeater"]
+  google,usb2-repeater: [usb-role-switch]
+
+additionalProperties: false

@@ -360,6 +360,17 @@ config GPIO_GENERIC_PLATFORM
 	help
 	  Say yes here to support basic platform_device memory-mapped GPIO controllers.
 
+config GPIO_GOOGLE_MALIBU_AOSS_ALERT
+	tristate "Google Malibu AOSS Type-C alert GPIO"
+	depends on ARM64 || COMPILE_TEST
+	depends on OF
+	select GPIOLIB_IRQCHIP
+	help
+	  Expose the input-only AOSS pad used by the Malibu Type-C alert.
+	  Its interrupt is cascaded from an AOSS SGIA input.
+	  The driver uses the hardware pad index and only supports this
+	  active-low alert input.
+
 config GPIO_GRANITERAPIDS
 	tristate "Intel Granite Rapids-D vGPIO support"
 	depends on X86 || COMPILE_TEST

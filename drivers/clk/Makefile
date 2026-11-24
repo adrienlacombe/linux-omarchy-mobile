@@ -100,6 +100,7 @@ obj-$(CONFIG_COMMON_CLK_RPMI)		+= clk-rpmi.o
 obj-$(CONFIG_COMMON_CLK_HI655X)		+= clk-hi655x.o
 obj-$(CONFIG_COMMON_CLK_S2MPS11)	+= clk-s2mps11.o
 scmi-clk-y				:= clk-scmi.o clk-scmi-oem.o
+obj-$(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM) += clk-google-malibu-cpm.o
 obj-$(CONFIG_COMMON_CLK_SCMI)           += scmi-clk.o
 obj-$(CONFIG_COMMON_CLK_SCPI)           += clk-scpi.o
 obj-$(CONFIG_COMMON_CLK_SI5341)		+= clk-si5341.o

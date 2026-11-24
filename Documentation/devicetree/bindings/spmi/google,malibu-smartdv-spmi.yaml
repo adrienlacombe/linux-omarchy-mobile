@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/spmi/google,malibu-smartdv-spmi.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Tensor G6 SmartDV SPMI controller
+
+maintainers:
+  - Peter Griffin <peter.griffin@linaro.org>
+
+description: |
+  The Malibu SmartDV controller connects the host to PMIC functions on
+  an SPMI bus. The controller reports the result of a transaction in
+  its memory-mapped status register.
+
+allOf:
+  - $ref: spmi.yaml#
+
+properties:
+  compatible:
+    const: google,malibu-smartdv-spmi
+
+  reg:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+  - '#address-cells'
+  - '#size-cells'
+
+unevaluatedProperties: false

@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/interrupt-controller/google,malibu-sgia.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Tensor G6 single-bank interrupt aggregator
+
+maintainers:
+  - Peter Griffin <peter.griffin@linaro.org>
+
+description: |
+  The Malibu interrupt aggregator combines up to 32 fixed level or pulse
+  input lines onto one upstream interrupt. The interrupt specifier
+  is the zero-based input number.
+
+properties:
+  compatible:
+    enum:
+      - google,malibu-level-sgia
+      - google,malibu-pulse-sgia
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  interrupt-controller: true
+
+  '#interrupt-cells':
+    const: 1
+
+  '#address-cells':
+    const: 0
+
+  power-domains:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - interrupt-controller
+  - '#interrupt-cells'
+
+additionalProperties: false

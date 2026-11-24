@@ -1,0 +1,116 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/clock/google,malibu-cpm-io.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Tensor G6 CPM I/O resource controller
+
+maintainers:
+  - Peter Griffin <peter.griffin@linaro.org>
+
+description: |
+  CPM controls the clocks and resets for the HSION USB2 and LSIOE I2C3
+  controllers and their power domain hierarchies. The host uses
+  separate MBA v3 queues for requests and replies. Clock, reset and
+  power domain indices are defined in google,malibu-cpm-io.h.
+
+properties:
+  compatible:
+    const: google,malibu-cpm-io
+
+  mboxes:
+    items:
+      - description: Request mailbox.
+      - description: Response mailbox.
+
+  mbox-names:
+    items:
+      - const: tx
+      - const: rx
+
+  '#clock-cells':
+    const: 1
+
+  '#reset-cells':
+    const: 1
+
+  '#power-domain-cells':
+    const: 1
+    description: |
+      Domain 0 is HSION, domain 1 is the USB top, and domain 2 is the
+      USB power switch. USB top is a child of HSION and the switch is
+      a child of USB top. Domain 3 is LSIOE and domain 4 is its client
+      domain for I2C3.
+
+  regulators:
+    type: object
+    description: Fixed-voltage eUSB2 rails exposed by the DA9188 and DA9189 service.
+    additionalProperties: false
+
+    properties:
+      ldo-19m:
+        $ref: /schemas/regulator/regulator.yaml#
+        unevaluatedProperties: false
+        description: Switchable 3.3 V DA9188 rail.
+        properties:
+          regulator-name:
+            const: ldo_19m
+          regulator-min-microvolt:
+            const: 3300000
+          regulator-max-microvolt:
+            const: 3300000
+          regulator-always-on: false
+          regulator-boot-on: false
+        required:
+          - regulator-name
+          - regulator-min-microvolt
+          - regulator-max-microvolt
+
+      buck-12s:
+        $ref: /schemas/regulator/regulator.yaml#
+        unevaluatedProperties: false
+        description: Always-on 1.85 V DA9189 rail.
+        properties:
+          regulator-name:
+            const: buck_12s
+          regulator-min-microvolt:
+            const: 1850000
+          regulator-max-microvolt:
+            const: 1850000
+        required:
+          - regulator-name
+          - regulator-min-microvolt
+          - regulator-max-microvolt
+          - regulator-always-on
+
+      ldo-12s:
+        $ref: /schemas/regulator/regulator.yaml#
+        unevaluatedProperties: false
+        description: Always-on 1.2 V DA9189 rail.
+        properties:
+          regulator-name:
+            const: ldo_12s
+          regulator-min-microvolt:
+            const: 1200000
+          regulator-max-microvolt:
+            const: 1200000
+        required:
+          - regulator-name
+          - regulator-min-microvolt
+          - regulator-max-microvolt
+          - regulator-always-on
+
+    required:
+      - ldo-19m
+      - buck-12s
+      - ldo-12s
+
+required:
+  - compatible
+  - mboxes
+  - mbox-names
+  - '#clock-cells'
+  - '#reset-cells'
+
+additionalProperties: false

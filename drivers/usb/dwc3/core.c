@@ -22,6 +22,7 @@
 #include <linux/list.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
+#include <linux/iommu.h>
 #include <linux/of.h>
 #include <linux/of_graph.h>
 #include <linux/acpi.h>
@@ -2315,6 +2316,14 @@ int dwc3_core_probe(const struct dwc3_probe_data *data)
 	dwc->regs_size	= resource_size(&dwc_res);
 
 	dwc3_get_properties(dwc);
+
+	if (of_device_is_compatible(dev_of_node(dev->parent), "google,malibu-dwc3")) {
+		struct iommu_domain *domain = iommu_get_domain_for_dev(dwc->sysdev);
+
+		if (!domain || !iommu_is_dma_domain(domain))
+			return dev_err_probe(dev, -ENODEV,
+					     "Malibu USB requires a translated DMA domain\n");
+	}
 
 	dwc3_get_software_properties(dwc, &data->properties);
 

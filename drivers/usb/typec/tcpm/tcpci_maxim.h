@@ -7,6 +7,10 @@
 #ifndef TCPCI_MAXIM_H_
 #define TCPCI_MAXIM_H_
 
+#define TCPC_VENDOR_USBSW_CTRL				0x93
+#define TCPC_VENDOR_USBSW_CTRL_ENABLE_USB_DATA		0x9
+#define TCPC_VENDOR_USBSW_CTRL_DISABLE_USB_DATA		0
+
 #define VENDOR_CC_STATUS2                       0x85
 #define CC1_VUFP_RD0P5                          BIT(1)
 #define CC2_VUFP_RD0P5                          BIT(5)

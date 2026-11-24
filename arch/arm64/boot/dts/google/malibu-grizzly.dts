@@ -1,0 +1,100 @@
+// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+/dts-v1/;
+
+#include "malibu.dtsi"
+
+/ {
+	model = "Google Pixel 11 Pro";
+	compatible = "google,malibu-grizzly", "google,malibu";
+
+	chosen {
+		bootargs = "rdinit=/init panic=10 arm_si_l1_workaround_4311569";
+	};
+
+	/* Bootstrap range from the factory DT, before bootloader fixups. */
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x10000000>;
+	};
+
+	/* B0 is the selector observed on the development phone. */
+	soc_compatible {
+		B0 {
+			product_id = <0x06>;
+			major = <1>;
+			minor = <0>;
+			pkg_mode = <0>;
+		};
+	};
+};
+
+&{/reserved-memory} {
+	/* D1 expands the older final page to a 16 KiB carveout. */
+	/delete-node/ cpu-stats@8b20f000;
+
+	cpu_stats_carveout@8b20c000 {
+		reg = <0x0 0x8b20c000 0x0 0x4000>;
+		no-map;
+	};
+};
+
+&cpm {
+	usb2_rails: regulators {
+		status = "disabled";
+
+		ldo_19m: ldo-19m {
+			regulator-name = "ldo_19m";
+			regulator-min-microvolt = <3300000>;
+			regulator-max-microvolt = <3300000>;
+		};
+
+		buck_12s: buck-12s {
+			regulator-name = "buck_12s";
+			regulator-min-microvolt = <1850000>;
+			regulator-max-microvolt = <1850000>;
+			regulator-always-on;
+		};
+
+		ldo_12s: ldo-12s {
+			regulator-name = "ldo_12s";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-always-on;
+		};
+	};
+};
+
+&lsioe_i2c3 {
+	eusb2_repeater: repeater@3e {
+		compatible = "ti,tusb2e11";
+		reg = <0x3e>;
+		vdd33-supply = <&ldo_19m>;
+		vdd18-supply = <&buck_12s>;
+		vdd-reset-supply = <&ldo_12s>;
+		usb-role-switch;
+		status = "disabled";
+	};
+};
+
+&spmi_cpm {
+	tcpc: typec@4 {
+		compatible = "maxim,max77779-tcpc-spmi";
+		reg = <4 0>;
+		interrupts-extended = <&aoss_alert_gpio 0x61 IRQ_TYPE_LEVEL_LOW>;
+		maxim,usb2-role-switch = <&usb>;
+		status = "disabled";
+
+		connector {
+			compatible = "usb-c-connector";
+			power-role = "sink";
+			data-role = "device";
+			typec-power-opmode = "default";
+			pd-disable;
+		};
+	};
+};
+
+&usb {
+	usb-role-switch;
+	google,usb2-repeater = <&eusb2_repeater>;
+};

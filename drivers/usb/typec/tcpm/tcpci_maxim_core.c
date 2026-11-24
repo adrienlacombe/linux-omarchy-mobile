@@ -22,10 +22,6 @@
 #define PD_ACTIVITY_TIMEOUT_MS				10000
 
 #define TCPC_VENDOR_ALERT				0x80
-#define TCPC_VENDOR_USBSW_CTRL				0x93
-#define TCPC_VENDOR_USBSW_CTRL_ENABLE_USB_DATA		0x9
-#define TCPC_VENDOR_USBSW_CTRL_DISABLE_USB_DATA		0
-
 #define TCPC_RECEIVE_BUFFER_COUNT_OFFSET		0
 #define TCPC_RECEIVE_BUFFER_FRAME_TYPE_OFFSET		1
 #define TCPC_RECEIVE_BUFFER_RX_BYTE_BUF_OFFSET		2
@@ -319,11 +315,12 @@ static void max_tcpci_set_partner_usb_comm_capable(struct tcpci *tcpci, struct t
  * attach; a PD partner that is not USB communications capable opens them
  * again through set_partner_usb_comm_capable().
  */
-static void max_tcpci_set_roles(struct tcpci *tcpci, struct tcpci_data *data, bool attached,
-				enum typec_role role, enum typec_data_role data_role)
+static int max_tcpci_set_roles(struct tcpci *tcpci, struct tcpci_data *data, bool attached,
+			       enum typec_role role, enum typec_data_role data_role)
 {
 	if (attached)
 		max_tcpci_set_usb_switches(tdata_to_max_tcpci(data), true);
+	return 0;
 }
 
 static irqreturn_t _max_tcpci_irq(struct max_tcpci_chip *chip, u16 status)
