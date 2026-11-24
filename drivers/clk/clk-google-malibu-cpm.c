@@ -14,8 +14,10 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
+#include <linux/pm_runtime.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
 #include <linux/reset-controller.h>
@@ -62,6 +64,15 @@
 #define MALIBU_MBFS_HSIOS_ID		0x1a
 #define MALIBU_MBFS_UFS_PREP_ID		0x222
 #define MALIBU_MBFS_UFS_CORE_ID		0x220
+#define MALIBU_MBFS_UFS_CORE_NAME	"HsioSUfs.v"
+
+enum malibu_ufs_idle_stage {
+	MALIBU_UFS_IDLE_WAIT_OFF,
+	MALIBU_UFS_IDLE_RELEASED,
+	MALIBU_UFS_IDLE_PREP_ON,
+	MALIBU_UFS_IDLE_CORE_ON,
+	MALIBU_UFS_IDLE_STOPPED,
+};
 
 struct malibu_cpm {
 	struct device *dev;
@@ -80,6 +91,9 @@ struct malibu_cpm {
 	spinlock_t response_lock;
 	struct malibu_ufs_psm_regs ufs_psm;
 	struct delayed_work ufs_observe_work;
+	struct device *ufs_idle_prep;
+	struct device *ufs_idle_core;
+	int ufs_idle_stage;
 	u32 frame[4];
 	u32 response[3];
 	u32 transition_id;
@@ -96,6 +110,8 @@ struct malibu_cpm {
 	bool stalled;
 	bool trace_ufs_psm;
 	bool ufs_observe_late;
+	bool ufs_idle_prep_held;
+	bool ufs_idle_core_held;
 };
 
 struct malibu_cpm_clock {
@@ -915,13 +931,13 @@ static int malibu_mbfs_root(struct malibu_cpm *cpm, u32 *root)
 	return 0;
 }
 
-static int malibu_mbfs_read_domain(struct malibu_cpm_domain *domain, bool *on)
+static int malibu_mbfs_read_vote(struct malibu_cpm *cpm, u32 handle, bool *on)
 {
-	const u32 payload[] = { MALIBU_MBFS_READ | domain->handle, 0, 0 };
+	const u32 payload[] = { MALIBU_MBFS_READ | handle, 0, 0 };
 	u32 reply[3];
 	int ret;
 
-	ret = malibu_mbfs_request(domain->cpm, payload, reply);
+	ret = malibu_mbfs_request(cpm, payload, reply);
 	if (ret)
 		return ret;
 	if (FIELD_GET(MALIBU_MBFS_STATUS, reply[0]))
@@ -930,6 +946,11 @@ static int malibu_mbfs_read_domain(struct malibu_cpm_domain *domain, bool *on)
 		return -EPROTO;
 	*on = reply[1];
 	return 0;
+}
+
+static int malibu_mbfs_read_domain(struct malibu_cpm_domain *domain, bool *on)
+{
+	return malibu_mbfs_read_vote(domain->cpm, domain->handle, on);
 }
 
 static int malibu_mbfs_set_domain(struct malibu_cpm_domain *domain, bool on)
@@ -1012,6 +1033,119 @@ static int malibu_mbfs_lazy_on(struct malibu_cpm_domain *domain, const char **so
 	return ret;
 }
 
+static bool malibu_ufs_idle_diag(struct malibu_cpm *cpm)
+{
+	return IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_IDLE_DIAG) &&
+	       cpm->trace_ufs_psm;
+}
+
+static bool malibu_ufs_idle_sample(struct malibu_cpm *cpm, const char *phase,
+				   unsigned int psm1)
+{
+	struct malibu_ufs_psm_sample sample;
+
+	malibu_ufs_sample_psms(&cpm->ufs_psm, &sample);
+	malibu_ufs_log_psms(cpm->dev, phase, &sample);
+	return sample.children_valid && (sample.hc & 0x1f) == (0x10 | psm1) &&
+	       (sample.phy & 0x1f) == 0x11;
+}
+
+static int malibu_ufs_idle_power_on(struct malibu_cpm_domain *domain)
+{
+	struct malibu_cpm *cpm = domain->cpm;
+	bool prep = domain->id == MALIBU_MBFS_UFS_PREP_ID;
+	bool on;
+	int expected = prep ? MALIBU_UFS_IDLE_RELEASED : MALIBU_UFS_IDLE_PREP_ON;
+	const char *source = "blocked";
+	int ret = -EAGAIN;
+
+	if (cmpxchg(&cpm->ufs_idle_stage, expected, MALIBU_UFS_IDLE_STOPPED) != expected)
+		goto out;
+
+	source = "lookup-error";
+	ret = malibu_mbfs_lookup(cpm, cpm->mbfs_root, domain->genpd.name, &domain->handle);
+	if (ret)
+		goto out;
+	source = "read-error";
+	ret = malibu_mbfs_read_domain(domain, &on);
+	if (ret)
+		goto out;
+	if (on) {
+		source = "inherited";
+		ret = -EBUSY;
+		goto out;
+	}
+
+	source = "blocked";
+	ret = -EAGAIN;
+	if (!malibu_ufs_idle_sample(cpm, prep ? "ufs-uic-v40 prep-on-before" :
+				    "ufs-uic-v40 core-on-before", prep ? 3 : 2))
+		goto out;
+
+	ret = malibu_mbfs_set_domain(domain, true);
+	source = ret ? "request-error" : "issued";
+	if (ret)
+		goto out;
+	domain->powered_here = true;
+
+	if (prep) {
+		if (!malibu_ufs_idle_sample(cpm, "ufs-uic-v40 prep-on-after", 2)) {
+			/* The owned vote is on, so report ON to genpd and block core. */
+			dev_info(cpm->dev, "ufs-uic-v40 prep did not reach PSM1=2\n");
+			goto out;
+		}
+		WRITE_ONCE(cpm->ufs_idle_stage, MALIBU_UFS_IDLE_PREP_ON);
+	} else {
+		struct malibu_ufs_psm_sample sample;
+
+		malibu_ufs_sample_psms(&cpm->ufs_psm, &sample);
+		malibu_ufs_log_psms(cpm->dev, "ufs-uic-v40 core-on-after", &sample);
+		WRITE_ONCE(cpm->ufs_idle_stage, MALIBU_UFS_IDLE_CORE_ON);
+	}
+out:
+	dev_info(cpm->dev, "ufs-uic-v40 domain=%s on=%s owned=%d ret=%d\n",
+		 domain->genpd.name, source, domain->powered_here, ret);
+	return ret;
+}
+
+static int malibu_ufs_idle_power_off(struct malibu_cpm_domain *domain)
+{
+	struct malibu_cpm *cpm = domain->cpm;
+	bool core_on;
+	bool owned = domain->powered_here;
+	u32 handle;
+	int ret = -EBUSY;
+
+	if (domain->id != MALIBU_MBFS_UFS_PREP_ID ||
+	    cmpxchg(&cpm->ufs_idle_stage, MALIBU_UFS_IDLE_WAIT_OFF,
+		    MALIBU_UFS_IDLE_STOPPED) != MALIBU_UFS_IDLE_WAIT_OFF ||
+	    !owned)
+		goto out;
+
+	ret = malibu_mbfs_lookup(cpm, cpm->mbfs_root, MALIBU_MBFS_UFS_CORE_NAME, &handle);
+	if (ret)
+		goto out;
+	ret = malibu_mbfs_read_vote(cpm, handle, &core_on);
+	if (ret)
+		goto out;
+	dev_info(cpm->dev, "ufs-uic-v40 pre-idle core client vote=%d\n", core_on);
+	if (core_on || !malibu_ufs_idle_sample(cpm, "ufs-uic-v40 prep-off-before", 0)) {
+		ret = -EBUSY;
+		goto out;
+	}
+
+	ret = malibu_mbfs_set_domain(domain, false);
+	if (ret)
+		goto out;
+	domain->powered_here = false;
+	if (malibu_ufs_idle_sample(cpm, "ufs-uic-v40 prep-off-after", 3))
+		WRITE_ONCE(cpm->ufs_idle_stage, MALIBU_UFS_IDLE_RELEASED);
+out:
+	dev_info(cpm->dev, "ufs-uic-v40 domain=%s off owned_before=%d owned_after=%d ret=%d\n",
+		 domain->genpd.name, owned, domain->powered_here, ret);
+	return ret;
+}
+
 static int malibu_mbfs_power_on(struct generic_pm_domain *genpd)
 {
 	struct malibu_cpm_domain *domain = container_of(genpd, struct malibu_cpm_domain, genpd);
@@ -1020,6 +1154,10 @@ static int malibu_mbfs_power_on(struct generic_pm_domain *genpd)
 	bool trace_hsios = domain->id == MALIBU_MBFS_HSIOS_ID && cpm->trace_ufs_psm;
 	const char *source;
 	int ret;
+
+	if (malibu_ufs_idle_diag(cpm) &&
+	    (domain->id == MALIBU_MBFS_UFS_PREP_ID || domain->id == MALIBU_MBFS_UFS_CORE_ID))
+		return malibu_ufs_idle_power_on(domain);
 
 	if (!domain->lazy)
 		return malibu_mbfs_set_domain(domain, true);
@@ -1057,6 +1195,11 @@ static int malibu_mbfs_initial_ufs_vote(struct malibu_cpm_domain *domain)
 		dev_info(cpm->dev, "ufs-uic-v39 domain=%s vote=skipped wrapper-off\n", name);
 		return -EHOSTDOWN;
 	}
+	if (malibu_ufs_idle_diag(cpm) && domain->id == MALIBU_MBFS_UFS_PREP_ID &&
+	    ((sample.hc & 0x1f) != 0x10 || (sample.phy & 0x1f) != 0x11)) {
+		dev_info(cpm->dev, "ufs-uic-v40 prep seed skipped outside handoff state\n");
+		return -EAGAIN;
+	}
 
 	ret = malibu_mbfs_lazy_on(domain, &source);
 	dev_info(cpm->dev, "ufs-uic-v39 domain=%s initial-vote=%s ret=%d\n", name, source, ret);
@@ -1072,6 +1215,10 @@ static int malibu_mbfs_power_off(struct generic_pm_domain *genpd)
 {
 	struct malibu_cpm_domain *domain = container_of(genpd, struct malibu_cpm_domain, genpd);
 	int ret;
+
+	if (malibu_ufs_idle_diag(domain->cpm) &&
+	    (domain->id == MALIBU_MBFS_UFS_PREP_ID || domain->id == MALIBU_MBFS_UFS_CORE_ID))
+		return malibu_ufs_idle_power_off(domain);
 
 	if (domain->lazy && !domain->powered_here)
 		return 0;
@@ -1126,7 +1273,7 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 			.lazy = true,
 		},
 		[MALIBU_CPM_PD_UFS] = {
-			"HsioSUfs.v", MALIBU_MBFS_UFS_CORE_ID, MALIBU_CPM_PD_UFS_PREP,
+			MALIBU_MBFS_UFS_CORE_NAME, MALIBU_MBFS_UFS_CORE_ID, MALIBU_CPM_PD_UFS_PREP,
 			.lazy = true,
 		},
 	};
@@ -1169,7 +1316,7 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 				return ret;
 		} else if (initial_ufs_votes &&
 			   (i == MALIBU_CPM_PD_HSIOS || i == MALIBU_CPM_PD_UFS_PREP ||
-			    i == MALIBU_CPM_PD_UFS)) {
+			    (i == MALIBU_CPM_PD_UFS && !malibu_ufs_idle_diag(cpm)))) {
 			ret = malibu_mbfs_initial_ufs_vote(domain);
 			if (ret) {
 				dev_warn(dev, "ufs-uic-v39 initial vote sequence stopped at %s: %pe\n",
@@ -1177,8 +1324,8 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 				initial_ufs_votes = false;
 			} else {
 				initially_on[i] = true;
-				/* Keep idle genpd work from adding an OFF to this trial. */
-				domain->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
+				if (!malibu_ufs_idle_diag(cpm) || i == MALIBU_CPM_PD_HSIOS)
+					domain->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
 			}
 		}
 		if (parent != MALIBU_MBFS_NO_PARENT && initially_on[i] && !initially_on[parent])
@@ -1315,6 +1462,74 @@ static void malibu_cpm_log_ufs_psms(struct malibu_cpm *cpm, const char *phase)
 	malibu_ufs_log_psms(cpm->dev, phase, &sample);
 }
 
+static void malibu_cpm_idle_resume(struct malibu_cpm *cpm)
+{
+	struct platform_device *ufs;
+	struct device_node *node;
+	struct device *prep, *core;
+	int ret;
+
+	ret = READ_ONCE(cpm->ufs_idle_stage);
+	if (ret != MALIBU_UFS_IDLE_RELEASED) {
+		dev_info(cpm->dev, "ufs-uic-v40 idle release not qualified stage=%d\n", ret);
+		return;
+	}
+
+	node = of_find_node_by_path("ufs0");
+	ufs = node ? of_find_device_by_node(node) : NULL;
+	of_node_put(node);
+	if (!ufs) {
+		dev_info(cpm->dev, "ufs-uic-v40 UFS domain consumer unavailable\n");
+		return;
+	}
+	prep = dev_pm_domain_attach_by_name(&ufs->dev, "prep");
+	core = dev_pm_domain_attach_by_name(&ufs->dev, "core");
+	put_device(&ufs->dev);
+	if (!IS_ERR_OR_NULL(prep))
+		cpm->ufs_idle_prep = prep;
+	if (!IS_ERR_OR_NULL(core))
+		cpm->ufs_idle_core = core;
+	if (!cpm->ufs_idle_prep || !cpm->ufs_idle_core) {
+		dev_info(cpm->dev, "ufs-uic-v40 could not attach prep and core\n");
+		return;
+	}
+
+	dev_info(cpm->dev, "ufs-uic-v40 genpd before resume prep_on=%d core_on=%d\n",
+		 dev_pm_genpd_is_on(prep), dev_pm_genpd_is_on(core));
+	if (dev_pm_genpd_is_on(prep) || dev_pm_genpd_is_on(core))
+		return;
+
+	ret = pm_runtime_resume_and_get(prep);
+	cpm->ufs_idle_prep_held = ret >= 0;
+	dev_info(cpm->dev, "ufs-uic-v40 prep resume ret=%d genpd_on=%d\n",
+		 ret, dev_pm_genpd_is_on(prep));
+	if (ret < 0 || READ_ONCE(cpm->ufs_idle_stage) != MALIBU_UFS_IDLE_PREP_ON)
+		return;
+
+	ret = pm_runtime_resume_and_get(core);
+	cpm->ufs_idle_core_held = ret >= 0;
+	dev_info(cpm->dev, "ufs-uic-v40 core resume ret=%d genpd_on=%d\n",
+		 ret, dev_pm_genpd_is_on(core));
+}
+
+static void malibu_cpm_stop_idle_diag(void *data)
+{
+	struct malibu_cpm *cpm = data;
+
+	cancel_delayed_work_sync(&cpm->ufs_observe_work);
+	WRITE_ONCE(cpm->ufs_idle_stage, MALIBU_UFS_IDLE_STOPPED);
+	if (cpm->ufs_idle_core) {
+		if (cpm->ufs_idle_core_held)
+			pm_runtime_put_noidle(cpm->ufs_idle_core);
+		dev_pm_domain_detach(cpm->ufs_idle_core, false);
+	}
+	if (cpm->ufs_idle_prep) {
+		if (cpm->ufs_idle_prep_held)
+			pm_runtime_put_noidle(cpm->ufs_idle_prep);
+		dev_pm_domain_detach(cpm->ufs_idle_prep, false);
+	}
+}
+
 static void malibu_cpm_observe_ufs(struct work_struct *work)
 {
 	struct malibu_cpm *cpm = container_of(to_delayed_work(work), struct malibu_cpm,
@@ -1326,6 +1541,8 @@ static void malibu_cpm_observe_ufs(struct work_struct *work)
 	}
 
 	malibu_cpm_log_ufs_psms(cpm, "cpm-observe-2s");
+	if (malibu_ufs_idle_diag(cpm))
+		malibu_cpm_idle_resume(cpm);
 	cpm->ufs_observe_late = true;
 	schedule_delayed_work(&cpm->ufs_observe_work, msecs_to_jiffies(18000));
 }
@@ -1400,8 +1617,13 @@ static int malibu_cpm_probe(struct platform_device *pdev)
 		dev_warn(dev, "UFS regulator service unavailable: %pe\n", ERR_PTR(ret));
 	platform_set_drvdata(pdev, cpm);
 	if (cpm->trace_ufs_psm && !IS_ENABLED(CONFIG_SCSI_UFS_MALIBU)) {
-		ret = devm_delayed_work_autocancel(dev, &cpm->ufs_observe_work,
-						  malibu_cpm_observe_ufs);
+		if (malibu_ufs_idle_diag(cpm)) {
+			INIT_DELAYED_WORK(&cpm->ufs_observe_work, malibu_cpm_observe_ufs);
+			ret = devm_add_action_or_reset(dev, malibu_cpm_stop_idle_diag, cpm);
+		} else {
+			ret = devm_delayed_work_autocancel(dev, &cpm->ufs_observe_work,
+							   malibu_cpm_observe_ufs);
+		}
 		if (ret)
 			dev_warn(dev, "ufs-uic-v38 failed to register delayed PSM samples: %pe\n",
 				 ERR_PTR(ret));

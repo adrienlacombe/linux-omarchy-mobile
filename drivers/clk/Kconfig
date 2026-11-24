@@ -127,6 +127,15 @@ config COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_VOTE_DIAG
 	  This is for attended diagnostics with the UFS driver disabled.
 	  Leave disabled in normal kernels.
 
+config COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_IDLE_DIAG
+	bool "Grizzly UFS idle prep transition diagnostic"
+	depends on COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_VOTE_DIAG
+	help
+	  Hold HSIO-S and let genpd release an acquired UFS prep vote.
+	  Resume prep and request core ON only after guarded measurements
+	  show PSM1 moving from 3 to 2. The UFS host stays disabled.
+	  Leave disabled in normal kernels.
+
 config COMMON_CLK_SCMI
 	tristate "Clock driver controlled via SCMI interface"
 	depends on ARM_SCMI_PROTOCOL || COMPILE_TEST
