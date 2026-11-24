@@ -132,7 +132,8 @@ static int malibu_mba_startup(struct mbox_chan *chan)
 {
 	struct malibu_mba *mba = chan->con_priv;
 	u32 config;
-	u32 status;
+	u32 outstanding, status;
+	bool used;
 
 	/* The mailbox core's blocking timeout cannot cancel a hardware send. */
 	if (chan->cl->tx_block)
@@ -140,10 +141,11 @@ static int malibu_mba_startup(struct mbox_chan *chan)
 
 	scoped_guard(spinlock_irqsave, &mba->lock) {
 		status = readl(mba->base + MALIBU_MBA_IRQ_STATUS);
+		outstanding = readl(mba->base + MALIBU_MBA_OUTSTANDING);
+		used = mba->used;
 		/* A used queue has no verified protocol for a new client's starting slot. */
-		if (mba->used || readl(mba->base + MALIBU_MBA_OUTSTANDING) ||
-		    (status & MALIBU_MBA_RX_IRQ))
-			return -EBUSY;
+		if (used || outstanding || (status & MALIBU_MBA_RX_IRQ))
+			goto busy;
 		writel(MALIBU_MBA_TX_IRQ, mba->base + MALIBU_MBA_IRQ_STATUS);
 		config = readl(mba->base + MALIBU_MBA_IRQ_CONTROL);
 		writel(config | MALIBU_MBA_IRQ_ENABLE_MASK, mba->base + MALIBU_MBA_IRQ_CONTROL);
@@ -152,6 +154,12 @@ static int malibu_mba_startup(struct mbox_chan *chan)
 
 	enable_irq(mba->irq);
 	return 0;
+
+busy:
+	dev_warn(mba->controller.dev,
+		 "mailbox startup rejected: used=%u outstanding=%#x irq_status=%#x\n",
+		 used, outstanding, status);
+	return -EBUSY;
 }
 
 static void malibu_mba_shutdown(struct mbox_chan *chan)
