@@ -1281,6 +1281,7 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 	struct malibu_cpm_domains *provider;
 	bool initial_ufs_votes = IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_VOTE_DIAG) &&
 				 cpm->trace_ufs_psm;
+	const bool prep_release = IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_PREP_RELEASE);
 	bool initially_on[MALIBU_MBFS_DOMAIN_COUNT];
 	unsigned int i;
 	int ret;
@@ -1326,6 +1327,9 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 				initially_on[i] = true;
 				if (!malibu_ufs_idle_diag(cpm) || i == MALIBU_CPM_PD_HSIOS)
 					domain->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
+				else if (prep_release && i == MALIBU_CPM_PD_UFS_PREP &&
+					 domain->powered_here)
+					domain->genpd.flags |= GENPD_FLAG_NO_STAY_ON;
 			}
 		}
 		if (parent != MALIBU_MBFS_NO_PARENT && initially_on[i] && !initially_on[parent])

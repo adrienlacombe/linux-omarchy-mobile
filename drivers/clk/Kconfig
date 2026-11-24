@@ -145,6 +145,16 @@ config COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_GENPD_TRACE
 	  and hardware requests unchanged.
 	  Leave disabled except when collecting diagnostic boot logs.
 
+config COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_PREP_RELEASE
+	bool "Allow Grizzly diagnostic prep idle release before provider sync"
+	depends on COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_GENPD_TRACE
+	help
+	  Skip the genpd boot-on latch for the Grizzly UFS prep domain
+	  only after the idle diagnostic acquires its initial prep vote.
+	  The diagnostic still checks vote ownership, core vote and
+	  guarded power states before requesting a release or resume.
+	  Leave disabled except for attended Grizzly diagnostics.
+
 config COMMON_CLK_SCMI
 	tristate "Clock driver controlled via SCMI interface"
 	depends on ARM_SCMI_PROTOCOL || COMPILE_TEST
