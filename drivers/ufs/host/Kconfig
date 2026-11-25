@@ -118,6 +118,16 @@ config SCSI_UFS_MALIBU_LBA0_DIAG
 	  exposing the block contents or scanning for partitions.
 	  Leave disabled outside Grizzly diagnostic builds.
 
+config SCSI_UFS_MALIBU_GPT_HEADER_DIAG
+	bool "Test the Grizzly primary GPT header before discovery"
+	depends on SCSI_UFS_MALIBU_LBA0_DIAG
+	select CRC32
+	help
+	  After the single LBA 0 read, read LBA 1 on LUN 0 and verify
+	  the primary GPT header CRC. Report the result without logging
+	  the header contents. Do not scan or read the entry array.
+	  Leave disabled outside Grizzly diagnostic builds.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM
