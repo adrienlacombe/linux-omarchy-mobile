@@ -6749,6 +6749,10 @@ void ufshcd_schedule_eh_work(struct ufs_hba *hba)
 {
 	lockdep_assert_held(hba->host->host_lock);
 
+	/* A diagnostic query may fail, but must never reinitialize the device. */
+	if (hba->link_query_only)
+		return;
+
 	/* handle fatal errors only when link is not in error state */
 	if (hba->ufshcd_state != UFSHCD_STATE_ERROR) {
 		if (hba->force_reset || ufshcd_is_link_broken(hba) ||
@@ -11293,6 +11297,107 @@ static int ufshcd_probe_hibern8(struct ufs_hba *hba)
 	return ret;
 }
 
+/* No SCSI requests exist in this diagnostic; only slot zero may be rung. */
+static int ufshcd_link_query_submit(struct ufs_hba *hba, bool read_attr, u32 *value)
+{
+	struct utp_devman_cmd_desc *ucd = hba->devman_ucd_base_addr;
+	struct utp_transfer_req_desc *utrd = hba->utrdl_base_addr;
+	struct utp_upiu_req *req = (void *)ucd->command_upiu;
+	struct utp_upiu_rsp *rsp = (void *)ucd->response_upiu;
+	u8 transaction = read_attr ? UPIU_TRANSACTION_QUERY_RSP : UPIU_TRANSACTION_NOP_IN;
+	u32 doorbell;
+	int ret;
+
+	memset(req, 0, sizeof(*req));
+	memset(rsp, 0, sizeof(*rsp));
+	utrd->header = (struct request_desc_header) {
+		.command_type = UTP_CMD_TYPE_UFS_STORAGE,
+		.ocs = OCS_INVALID_COMMAND_STATUS,
+	};
+	utrd->prd_table_length = 0;
+	if (read_attr) {
+		req->header.transaction_code = UPIU_TRANSACTION_QUERY_REQ;
+		req->header.query_function = UPIU_QUERY_FUNC_STANDARD_READ_REQUEST;
+		req->qr.opcode = UPIU_QUERY_OPCODE_READ_ATTR;
+		req->qr.idn = QUERY_ATTR_IDN_REF_CLK_FREQ;
+	} else {
+		req->header.transaction_code = UPIU_TRANSACTION_NOP_OUT;
+	}
+
+	dma_wmb();
+	ufshcd_writel(hba, BIT(0), REG_UTP_TRANSFER_REQ_DOOR_BELL);
+	ret = read_poll_timeout(ufshcd_readl, doorbell, !doorbell, 50, 100000,
+				false, hba, REG_UTP_TRANSFER_REQ_DOOR_BELL);
+	if (ret) {
+		int clear = ufshcd_clear_cmd(hba, 0);
+
+		dev_err(hba->dev, "ufs-uic-v48 doorbell timeout; clear ret=%d\n", clear);
+		return ret;
+	}
+
+	dma_rmb();
+	dev_info(hba->dev, "ufs-uic-v48 %s response OCS=%#x type=%#x code=%#x\n",
+		 read_attr ? "READ_ATTR(0x0a)" : "NOP", utrd->header.ocs,
+		 rsp->header.transaction_code, rsp->header.response);
+	if ((utrd->header.ocs & MASK_OCS) != OCS_SUCCESS ||
+	    rsp->header.transaction_code != transaction || rsp->header.task_tag ||
+	    rsp->header.response || rsp->header.data_segment_length)
+		return -EIO;
+	if (read_attr) {
+		if (rsp->qr.opcode != UPIU_QUERY_OPCODE_READ_ATTR ||
+		    rsp->qr.idn != QUERY_ATTR_IDN_REF_CLK_FREQ || rsp->qr.index ||
+		    rsp->qr.selector)
+			return -EIO;
+		*value = be32_to_cpu(rsp->qr.value);
+	}
+
+	return 0;
+}
+
+static int ufshcd_link_query_refclk(struct ufs_hba *hba)
+{
+	u32 status, value = 0;
+	int ret;
+
+	if (!hba->lsdb_sup || hba->mcq_enabled ||
+	    hba->dev_ref_clk_freq != REF_CLK_FREQ_38_4_MHZ)
+		return -EOPNOTSUPP;
+	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL) ||
+	    ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP))
+		return -EBUSY;
+
+	status = ufshcd_readl(hba, REG_CONTROLLER_STATUS);
+	if (!(status & DEVICE_PRESENT) || !(status & UTP_TRANSFER_REQ_LIST_READY))
+		return -EHOSTDOWN;
+
+	/* No completion is dispatched through the normal SCSI tag path. */
+	ufshcd_disable_intr(hba, UTP_TRANSFER_REQ_COMPL);
+	synchronize_irq(hba->irq);
+	ufshcd_writel(hba, lower_32_bits(hba->utrdl_dma_addr),
+		      REG_UTP_TRANSFER_REQ_LIST_BASE_L);
+	ufshcd_writel(hba, upper_32_bits(hba->utrdl_dma_addr),
+		      REG_UTP_TRANSFER_REQ_LIST_BASE_H);
+	ufshcd_writel(hba, UTP_TRANSFER_REQ_LIST_RUN_STOP_BIT,
+		      REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
+	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) !=
+	    UTP_TRANSFER_REQ_LIST_RUN_STOP_BIT)
+		return -EIO;
+
+	ret = ufshcd_link_query_submit(hba, false, &value);
+	if (!ret)
+		ret = ufshcd_link_query_submit(hba, true, &value);
+
+	ufshcd_writel(hba, 0, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
+	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) && !ret)
+		ret = -EIO;
+	if (ret)
+		return ret;
+
+	dev_info(hba->dev, "ufs-uic-v48 bRefClkFreq=%#x expected=%#x (38400000 Hz)\n",
+		 value, REF_CLK_FREQ_38_4_MHZ);
+	return value == REF_CLK_FREQ_38_4_MHZ ? 0 : -EINVAL;
+}
+
 /**
  * ufshcd_init_common - Driver initialization routine
  * @hba: per-adapter instance
@@ -11370,6 +11475,12 @@ static int ufshcd_init_common(struct ufs_hba *hba, void __iomem *mmio_base, unsi
 	if (err)
 		goto out_disable;
 
+	if (hba->link_query_only && (!link_only || !report || !hba->lsdb_sup ||
+				     hba->nutrs <= UFSHCD_NUM_RESERVED)) {
+		err = -EOPNOTSUPP;
+		goto out_disable;
+	}
+
 	/* Get UFS version supported by the controller */
 	hba->ufs_version = ufshcd_get_ufs_version(hba);
 
@@ -11382,7 +11493,7 @@ static int ufshcd_init_common(struct ufs_hba *hba, void __iomem *mmio_base, unsi
 		goto out_disable;
 	}
 
-	if (!link_only) {
+	if (!link_only || hba->link_query_only) {
 		err = ufshcd_memory_alloc(hba);
 		if (err) {
 			dev_err(hba->dev, "Memory allocation failed\n");
@@ -11485,6 +11596,10 @@ static int ufshcd_init_common(struct ufs_hba *hba, void __iomem *mmio_base, unsi
 		err = ufshcd_link_startup(hba, false);
 		if (report) {
 			dev_info(dev, "UIC link test result %d\n", err);
+			if (!err && hba->link_query_only) {
+				err = ufshcd_link_query_refclk(hba);
+				dev_info(dev, "ufs-uic-v48 device query result=%d\n", err);
+			}
 			if (!err)
 				hibern8_err = ufshcd_probe_hibern8(hba);
 		}

@@ -667,6 +667,7 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	hba->vops = &ufs_malibu_vops;
 	hba->lanes_per_direction = 2;
 	hba->quirks |= UFSHCD_QUIRK_READ_ONLY_REF_CLK;
+	hba->link_query_only = IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_QUERY_DIAG);
 	ufshcd_parse_dev_ref_clk_freq(hba, mphy);
 	ufshcd_set_variant(hba, ufs);
 

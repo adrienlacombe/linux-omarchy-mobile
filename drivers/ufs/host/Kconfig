@@ -64,6 +64,15 @@ config SCSI_UFS_MALIBU_HIBERN8_GATING_DIAG
 	  without transfer queues or SCSI devices.
 	  Leave disabled except when testing Grizzly diagnostics.
 
+config SCSI_UFS_MALIBU_QUERY_DIAG
+	bool "Test Grizzly device management before SCSI discovery"
+	depends on SCSI_UFS_MALIBU_HIBERN8_GATING_DIAG
+	help
+	  Use one polled legacy transfer slot to send a NOP and read
+	  bRefClkFreq on the Grizzly link diagnostic. Do not register
+	  a SCSI host or start task management, scanning or recovery.
+	  Leave disabled outside Grizzly diagnostic builds.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM
