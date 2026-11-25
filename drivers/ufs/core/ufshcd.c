@@ -2442,6 +2442,10 @@ static inline void ufshcd_send_command(struct ufs_hba *hba,
 						  ufshcd_is_scsi_cmd(cmd));
 		__set_bit(tag, &hba->outstanding_reqs);
 		ufshcd_writel(hba, 1 << tag, REG_UTP_TRANSFER_REQ_DOOR_BELL);
+		if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_TUR_DIAG) &&
+		    READ_ONCE(hba->link_scsi_phase) == UFS_LINK_SCSI_SENT)
+			dev_info(hba->dev, "ufs-uic-v62 TUR doorbell write tag=%d readback=%#x\n",
+				 tag, ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL));
 		spin_unlock_irqrestore(&hba->outstanding_lock, flags);
 	}
 }
@@ -3113,15 +3117,24 @@ static enum scsi_qc_status ufshcd_queuecommand(struct Scsi_Host *host,
 	struct ufs_hw_queue *hwq = NULL;
 
 	if (link_tur) {
-		if (cmd->device != host->pseudo_sdev || scsi_bufflen(cmd) ||
-		    cmd->cmd_len != sizeof(ufshcd_link_tur_cdb) ||
-		    memcmp(cmd->cmnd, ufshcd_link_tur_cdb, sizeof(ufshcd_link_tur_cdb)) ||
-		    cmpxchg(&hba->link_scsi_phase, UFS_LINK_SCSI_ARMED,
-			    UFS_LINK_SCSI_SENT) != UFS_LINK_SCSI_ARMED) {
+		bool pseudo = cmd->device == host->pseudo_sdev;
+		bool cdb_match = !memcmp(cmd->cmnd, ufshcd_link_tur_cdb,
+					 sizeof(ufshcd_link_tur_cdb));
+		unsigned int bytes = scsi_bufflen(cmd);
+
+		if (!pseudo || bytes || cmd->cmd_len != sizeof(ufshcd_link_tur_cdb) ||
+		    !cdb_match || cmpxchg(&hba->link_scsi_phase, UFS_LINK_SCSI_ARMED,
+					  UFS_LINK_SCSI_SENT) != UFS_LINK_SCSI_ARMED) {
+			dev_info(hba->dev,
+				 "ufs-uic-v62 TUR gate reject tag=%d phase=%d pseudo=%u bytes=%u cmd_len=%u cdb_match=%u cdb0=%#x cdb1=%#x lun_in_cdb=%u\n",
+				 tag, READ_ONCE(hba->link_scsi_phase), pseudo, bytes,
+				 cmd->cmd_len, cdb_match, cmd->cmnd[0], cmd->cmnd[1],
+				 cmd->device->lun_in_cdb);
 			set_host_byte(cmd, DID_TRANSPORT_FAILFAST);
 			scsi_done(cmd);
 			return 0;
 		}
+		dev_info(hba->dev, "ufs-uic-v62 TUR gate accepted tag=%d\n", tag);
 		goto send;
 	}
 	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG) && hba->link_query_only)
@@ -3179,6 +3192,9 @@ send:
 			      link_tur ? 0 : ufshcd_scsi_to_upiu_lun(cmd->device->lun), tag);
 
 	err = ufshcd_map_sg(hba, cmd);
+	if (link_tur)
+		dev_info(hba->dev, "ufs-uic-v62 TUR map tag=%d ret=%d sg=%u direction=%u\n",
+			 tag, err, scsi_sg_count(cmd), cmd->sc_data_direction);
 	if (err) {
 		ufshcd_release(hba);
 		if (link_tur) {
@@ -11358,6 +11374,8 @@ static int ufshcd_link_midlayer_tur(struct ufs_hba *hba)
 	scsi_unblock_requests(host);
 	result = scsi_execute_cmd(host->pseudo_sdev, ufshcd_link_tur_cdb,
 				  REQ_OP_DRV_IN, NULL, 0, HZ, 0, NULL);
+	dev_info(hba->dev, "ufs-uic-v62 TUR returned phase=%d raw=%#x\n",
+		 READ_ONCE(hba->link_scsi_phase), result);
 	scsi_block_requests(host);
 	ufshcd_disable_intr(hba, UTP_TRANSFER_REQ_COMPL);
 	ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
