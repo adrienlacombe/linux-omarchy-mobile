@@ -155,6 +155,15 @@ config SCSI_UFS_MALIBU_REPORT_LUNS_DIAG
 	  without attaching disks or issuing a command to another LUN.
 	  Leave disabled outside Grizzly diagnostic builds.
 
+config SCSI_UFS_MALIBU_MIDLAYER_TUR_DIAG
+	bool "Test one Grizzly SCSI midlayer TEST UNIT READY"
+	depends on SCSI_UFS_MALIBU_REPORT_LUNS_DIAG
+	help
+	  Send one no-data TEST UNIT READY to LUN 0 from the SCSI core
+	  pseudo-device in legacy mode. Bound failures without SCSI error
+	  recovery and remove the host without scanning or attaching disks.
+	  Leave disabled outside Grizzly diagnostic builds.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM

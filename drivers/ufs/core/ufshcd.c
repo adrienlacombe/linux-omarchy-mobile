@@ -43,6 +43,14 @@
 #include "ufshcd-crypto.h"
 #include <linux/unaligned.h>
 
+enum {
+	UFS_LINK_SCSI_IDLE,
+	UFS_LINK_SCSI_ARMED,
+	UFS_LINK_SCSI_SENT,
+};
+
+static const u8 ufshcd_link_tur_cdb[6] = { TEST_UNIT_READY };
+
 #define CREATE_TRACE_POINTS
 #include "ufs_trace.h"
 
@@ -3024,7 +3032,7 @@ static void ufshcd_setup_scsi_cmd(struct ufs_hba *hba, struct scsi_cmnd *cmd,
 	struct ufshcd_lrb *lrbp = scsi_cmd_priv(cmd);
 
 	__ufshcd_setup_cmd(hba, cmd, lun, tag);
-	lrbp->intr_cmd = !ufshcd_is_intr_aggr_allowed(hba);
+	lrbp->intr_cmd = hba->link_query_only || !ufshcd_is_intr_aggr_allowed(hba);
 	lrbp->req_abort_skip = false;
 
 	ufshcd_comp_scsi_upiu(hba, cmd);
@@ -3098,10 +3106,24 @@ static enum scsi_qc_status ufshcd_queuecommand(struct Scsi_Host *host,
 					       struct scsi_cmnd *cmd)
 {
 	struct ufs_hba *hba = shost_priv(host);
+	bool link_tur = IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_TUR_DIAG) &&
+			hba->link_query_only;
 	int tag = scsi_cmd_to_rq(cmd)->tag;
 	int err = 0;
 	struct ufs_hw_queue *hwq = NULL;
 
+	if (link_tur) {
+		if (cmd->device != host->pseudo_sdev || scsi_bufflen(cmd) ||
+		    cmd->cmd_len != sizeof(ufshcd_link_tur_cdb) ||
+		    memcmp(cmd->cmnd, ufshcd_link_tur_cdb, sizeof(ufshcd_link_tur_cdb)) ||
+		    cmpxchg(&hba->link_scsi_phase, UFS_LINK_SCSI_ARMED,
+			    UFS_LINK_SCSI_SENT) != UFS_LINK_SCSI_ARMED) {
+			set_host_byte(cmd, DID_TRANSPORT_FAILFAST);
+			scsi_done(cmd);
+			return 0;
+		}
+		goto send;
+	}
 	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG) && hba->link_query_only)
 		return SCSI_MLQUEUE_HOST_BUSY;
 
@@ -3148,16 +3170,22 @@ static enum scsi_qc_status ufshcd_queuecommand(struct Scsi_Host *host,
 		goto out;
 	}
 
+send:
 	hba->req_abort_count = 0;
 
 	ufshcd_hold(hba);
 
 	ufshcd_setup_scsi_cmd(hba, cmd,
-			      ufshcd_scsi_to_upiu_lun(cmd->device->lun), tag);
+			      link_tur ? 0 : ufshcd_scsi_to_upiu_lun(cmd->device->lun), tag);
 
 	err = ufshcd_map_sg(hba, cmd);
 	if (err) {
 		ufshcd_release(hba);
+		if (link_tur) {
+			set_host_byte(cmd, DID_TRANSPORT_FAILFAST);
+			scsi_done(cmd);
+			return 0;
+		}
 		goto out;
 	}
 
@@ -5810,7 +5838,7 @@ static inline int ufshcd_transfer_rsp_status(struct ufs_hba *hba,
 			 * solution could be to abort the system suspend if
 			 * UFS device needs urgent BKOPs.
 			 */
-			if (!hba->pm_op_in_progress &&
+			if (!hba->link_query_only && !hba->pm_op_in_progress &&
 			    !ufshcd_eh_in_progress(hba) &&
 			    ufshcd_is_exception_event(lrbp->ucd_rsp_ptr))
 				/* Flushed in suspend */
@@ -5942,6 +5970,22 @@ void ufshcd_release_scsi_cmd(struct ufs_hba *hba, struct scsi_cmnd *cmd)
 	ufshcd_clk_scaling_update_busy(hba);
 }
 
+static void ufshcd_link_check_tur_response(struct ufs_hba *hba, struct scsi_cmnd *cmd,
+					   struct ufshcd_lrb *lrb, enum utp_ocs ocs)
+{
+	const struct utp_upiu_header *rsp = &lrb->ucd_rsp_ptr->header;
+	int tag = scsi_cmd_to_rq(cmd)->tag;
+
+	dev_info(hba->dev, "ufs-uic-v61 midlayer TUR IRQ tag=%d OCS=%#x type=%#x response=%#x status=%#x raw=%#x\n",
+		 tag, ocs, rsp->transaction_code, rsp->response, rsp->status, cmd->result);
+	if (cmd->result || ocs != OCS_SUCCESS ||
+	    rsp->transaction_code != UPIU_TRANSACTION_RESPONSE ||
+	    rsp->lun || rsp->task_tag != tag || rsp->response || rsp->ehs_length ||
+	    rsp->data_segment_length || lrb->ucd_rsp_ptr->sr.residual_transfer_count ||
+	    (rsp->flags & (UPIU_RSP_FLAG_UNDERFLOW | UPIU_RSP_FLAG_OVERFLOW)))
+		set_host_byte(cmd, DID_TRANSPORT_FAILFAST);
+}
+
 /**
  * ufshcd_compl_one_cqe - handle a completion queue entry
  * @hba: per adapter instance
@@ -5968,6 +6012,10 @@ void ufshcd_compl_one_cqe(struct ufs_hba *hba, int task_tag,
 			ufshcd_update_monitor(hba, cmd);
 		ufshcd_add_command_trace(hba, cmd, UFS_CMD_COMP);
 		cmd->result = ufshcd_transfer_rsp_status(hba, cmd, cqe);
+		if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_TUR_DIAG) &&
+		    READ_ONCE(hba->link_scsi_phase) == UFS_LINK_SCSI_SENT)
+			ufshcd_link_check_tur_response(hba, cmd, lrbp,
+						       ufshcd_get_tr_ocs(lrbp, cqe));
 		ufshcd_release_scsi_cmd(hba, cmd);
 	} else {
 		if (cqe) {
@@ -6127,7 +6175,7 @@ static void ufshcd_mcq_compl_pending_transfer(struct ufs_hba *hba,
  */
 static irqreturn_t ufshcd_transfer_req_compl(struct ufs_hba *hba)
 {
-	if (hba->link_query_only) {
+	if (hba->link_query_only && READ_ONCE(hba->link_scsi_phase) == UFS_LINK_SCSI_IDLE) {
 		/* Pairs with the release when arming the INQUIRY completion. */
 		struct completion *done = smp_load_acquire(&hba->link_inquiry_done);
 
@@ -6148,7 +6196,7 @@ static irqreturn_t ufshcd_transfer_req_compl(struct ufs_hba *hba)
 	 * false interrupt if device completes another request after resetting
 	 * aggregation and before reading the DB.
 	 */
-	if (ufshcd_is_intr_aggr_allowed(hba) &&
+	if (!hba->link_query_only && ufshcd_is_intr_aggr_allowed(hba) &&
 	    !(hba->quirks & UFSHCI_QUIRK_SKIP_RESET_INTR_AGGR))
 		ufshcd_reset_intr_aggr(hba);
 
@@ -9663,9 +9711,43 @@ out:
 		dev_err(hba->dev, "%s failed: %d\n", __func__, ret);
 }
 
+static enum scsi_timeout_action ufshcd_link_tur_timeout(struct ufs_hba *hba,
+							struct scsi_cmnd *cmd)
+{
+	int tag = scsi_cmd_to_rq(cmd)->tag;
+	int ret = 0;
+
+	ufshcd_disable_intr(hba, UTP_TRANSFER_REQ_COMPL);
+	ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
+	synchronize_irq(hba->irq);
+	if (!test_bit(tag, &hba->outstanding_reqs))
+		return SCSI_EH_DONE;
+
+	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL) & BIT(tag))
+		ret = ufshcd_clear_cmd(hba, tag);
+	if (ret)
+		ufshcd_hba_stop(hba);
+
+	/*
+	 * TUR has no data buffer to unmap. The platform holds the HCI
+	 * descriptors until reboot, even if the controller did not stop.
+	 */
+	dev_err(hba->dev, "ufs-uic-v61 midlayer TUR timeout tag=%d clear=%d hce=%#x\n",
+		tag, ret, ufshcd_readl(hba, REG_CONTROLLER_ENABLE));
+	scoped_guard(spinlock_irq, &hba->outstanding_lock)
+		__clear_bit(tag, &hba->outstanding_reqs);
+	ufshcd_release_scsi_cmd(hba, cmd);
+	set_host_byte(cmd, DID_TRANSPORT_FAILFAST);
+	scsi_done(cmd);
+	return SCSI_EH_DONE;
+}
+
 static enum scsi_timeout_action ufshcd_eh_timed_out(struct scsi_cmnd *scmd)
 {
 	struct ufs_hba *hba = shost_priv(scmd->device->host);
+
+	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_TUR_DIAG) && hba->link_query_only)
+		return ufshcd_link_tur_timeout(hba, scmd);
 
 	if (!hba->pm_op_in_progress) {
 		/* Activate the error handler in the SCSI core. */
@@ -11252,6 +11334,42 @@ remove_scsi_host:
 	return err;
 }
 
+static int ufshcd_link_midlayer_tur(struct ufs_hba *hba)
+{
+	struct Scsi_Host *host = hba->host;
+	int result;
+
+	if (!host->pseudo_sdev ||
+	    ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL) ||
+	    ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) ||
+	    !(ufshcd_readl(hba, REG_CONTROLLER_STATUS) & UTP_TRANSFER_REQ_LIST_READY))
+		return -EIO;
+
+	ufshcd_writel(hba, UTP_TRANSFER_REQ_COMPL, REG_INTERRUPT_STATUS);
+	if (ufshcd_readl(hba, REG_INTERRUPT_STATUS) & UTP_TRANSFER_REQ_COMPL)
+		return -EIO;
+	ufshcd_writel(hba, UTP_TRANSFER_REQ_LIST_RUN_STOP_BIT, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
+	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) !=
+	    UTP_TRANSFER_REQ_LIST_RUN_STOP_BIT)
+		return -EIO;
+
+	WRITE_ONCE(hba->link_scsi_phase, UFS_LINK_SCSI_ARMED);
+	ufshcd_enable_intr(hba, UTP_TRANSFER_REQ_COMPL);
+	scsi_unblock_requests(host);
+	result = scsi_execute_cmd(host->pseudo_sdev, ufshcd_link_tur_cdb,
+				  REQ_OP_DRV_IN, NULL, 0, HZ, 0, NULL);
+	scsi_block_requests(host);
+	ufshcd_disable_intr(hba, UTP_TRANSFER_REQ_COMPL);
+	ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
+	synchronize_irq(hba->irq);
+	WRITE_ONCE(hba->link_scsi_phase, UFS_LINK_SCSI_IDLE);
+	ufshcd_writel(hba, 0, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
+	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) && !result)
+		result = -EIO;
+	dev_info(hba->dev, "ufs-uic-v61 midlayer TUR ret=%d\n", result);
+	return result > 0 ? -EIO : result;
+}
+
 static int ufshcd_link_probe_scsi_host(struct ufs_hba *hba)
 {
 	struct Scsi_Host *host = hba->host;
@@ -11275,6 +11393,8 @@ static int ufshcd_link_probe_scsi_host(struct ufs_hba *hba)
 				devices++;
 
 		dev_info(hba->dev, "ufs-uic-v59 SCSI host registered devices=%u\n", devices);
+		if (!devices && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_TUR_DIAG))
+			ret = ufshcd_link_midlayer_tur(hba);
 		ufshcd_remove_scsi_host(hba);
 		ufshcd_free_tmf_queue(hba);
 		dev_info(hba->dev, "ufs-uic-v59 SCSI host removed state=%u\n",
