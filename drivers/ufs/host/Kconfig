@@ -91,6 +91,15 @@ config SCSI_UFS_MALIBU_SCSI_INQUIRY_DIAG
 	  the response without registering a SCSI host or scanning for disks.
 	  Leave disabled outside Grizzly diagnostic builds.
 
+config SCSI_UFS_MALIBU_INQUIRY_IRQ_DIAG
+	bool "Require a transfer IRQ for the Grizzly INQUIRY test"
+	depends on SCSI_UFS_MALIBU_SCSI_INQUIRY_DIAG
+	help
+	  Keep the preflight commands polled and wait for the single INQUIRY
+	  on the hardware transfer completion interrupt. Do not fall back
+	  to polling if the interrupt is missing.
+	  Leave disabled outside Grizzly diagnostic builds.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM

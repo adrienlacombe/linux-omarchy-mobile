@@ -6115,6 +6115,20 @@ static void ufshcd_mcq_compl_pending_transfer(struct ufs_hba *hba,
  */
 static irqreturn_t ufshcd_transfer_req_compl(struct ufs_hba *hba)
 {
+	if (hba->link_query_only) {
+		/* Pairs with the release when arming the INQUIRY completion. */
+		struct completion *done = smp_load_acquire(&hba->link_inquiry_done);
+
+		if (done && !ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL)) {
+			/* A stale interrupt must not complete an unissued request. */
+			dma_rmb();
+			if ((READ_ONCE(hba->utrdl_base_addr[0].header.ocs) & MASK_OCS) !=
+			    OCS_INVALID_COMMAND_STATUS)
+				complete(done);
+		}
+		return IRQ_HANDLED;
+	}
+
 	/* Resetting interrupt aggregation counters first and reading the
 	 * DOOR_BELL afterward allows us to handle all the completed requests.
 	 * In order to prevent other interrupts starvation the DB is read once
@@ -11419,9 +11433,56 @@ static int ufshcd_link_query_device_init(struct ufs_hba *hba)
 	return ret;
 }
 
+static int ufshcd_link_submit_slot_irq(struct ufs_hba *hba)
+{
+	DECLARE_COMPLETION_ONSTACK(done);
+	u32 doorbell, irq_status;
+	unsigned long completed;
+
+	/* Discard the transfer status left by the earlier polled commands. */
+	ufshcd_writel(hba, UTP_TRANSFER_REQ_COMPL, REG_INTERRUPT_STATUS);
+	irq_status = ufshcd_readl(hba, REG_INTERRUPT_STATUS);
+	synchronize_irq(hba->irq);
+	if (irq_status & UTP_TRANSFER_REQ_COMPL)
+		return -EIO;
+	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL))
+		return -EBUSY;
+
+	dma_wmb();
+	/* Publish the initialized completion before the IRQ handler can use it. */
+	smp_store_release(&hba->link_inquiry_done, &done);
+	ufshcd_enable_intr(hba, UTP_TRANSFER_REQ_COMPL);
+	ufshcd_writel(hba, BIT(0), REG_UTP_TRANSFER_REQ_DOOR_BELL);
+	completed = wait_for_completion_timeout(&done, msecs_to_jiffies(100));
+
+	ufshcd_disable_intr(hba, UTP_TRANSFER_REQ_COMPL);
+	ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
+	synchronize_irq(hba->irq);
+	WRITE_ONCE(hba->link_inquiry_done, NULL);
+
+	if (completed) {
+		dma_rmb();
+		dev_info(hba->dev, "ufs-uic-v51 INQUIRY IRQ observed\n");
+		return 0;
+	}
+
+	doorbell = ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL);
+	irq_status = ufshcd_readl(hba, REG_INTERRUPT_STATUS);
+	dma_rmb();
+	dev_err(hba->dev, "ufs-uic-v51 INQUIRY IRQ timeout doorbell=%#x status=%#x OCS=%#x\n",
+		doorbell, irq_status, READ_ONCE(hba->utrdl_base_addr[0].header.ocs));
+	if (doorbell & BIT(0)) {
+		int clear = ufshcd_clear_cmd(hba, 0);
+
+		dev_info(hba->dev, "ufs-uic-v51 INQUIRY timeout clear ret=%d\n", clear);
+	}
+	return -ETIMEDOUT;
+}
+
 static int ufshcd_link_inquiry(struct ufs_hba *hba)
 {
 	enum { inquiry_len = 36 };
+	bool irq = IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_INQUIRY_IRQ_DIAG);
 	struct utp_devman_cmd_desc *ucd = hba->devman_ucd_base_addr;
 	struct utp_transfer_req_desc *utrd = hba->utrdl_base_addr;
 	struct utp_upiu_req *req = (void *)ucd->command_upiu;
@@ -11456,11 +11517,15 @@ static int ufshcd_link_inquiry(struct ufs_hba *hba)
 	utrd->header = (struct request_desc_header) {
 		.command_type = UTP_CMD_TYPE_UFS_STORAGE,
 		.data_direction = UTP_DEVICE_TO_HOST,
+		.interrupt = irq,
 		.ocs = OCS_INVALID_COMMAND_STATUS,
 	};
 	utrd->prd_table_length = cpu_to_le16(1);
 
-	ret = ufshcd_link_submit_slot(hba);
+	if (irq)
+		ret = ufshcd_link_submit_slot_irq(hba);
+	else
+		ret = ufshcd_link_submit_slot(hba);
 	if (ret)
 		return ret;
 

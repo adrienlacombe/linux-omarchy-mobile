@@ -1072,7 +1072,8 @@ enum ufshcd_mcq_opr {
  * @complete_put: whether or not to call ufshcd_rpm_put() from inside
  *	ufshcd_resume_complete()
  * @scsi_host_added: indicates that scsi_add_host() has been called
- * @link_query_only: allow only polled management commands in a link test
+ * @link_query_only: use the dedicated transfer slot in a link test
+ * @link_inquiry_done: armed completion for the link test INQUIRY IRQ
  * @mcq_sup: is mcq supported by UFSHC
  * @lsdb_sup: LSDBS capability
  * @mcq_enabled: is mcq ready to accept requests
@@ -1260,6 +1261,7 @@ struct ufs_hba {
 	bool complete_put;
 	bool scsi_host_added;
 	bool link_query_only;
+	struct completion *link_inquiry_done;
 	bool mcq_sup;
 	bool lsdb_sup;
 	bool mcq_enabled;
