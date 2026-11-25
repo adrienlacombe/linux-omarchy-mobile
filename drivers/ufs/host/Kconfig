@@ -100,6 +100,15 @@ config SCSI_UFS_MALIBU_INQUIRY_IRQ_DIAG
 	  to polling if the interrupt is missing.
 	  Leave disabled outside Grizzly diagnostic builds.
 
+config SCSI_UFS_MALIBU_CAPACITY_DIAG
+	bool "Test Grizzly READ CAPACITY(10) before discovery"
+	depends on SCSI_UFS_MALIBU_INQUIRY_IRQ_DIAG
+	help
+	  After a successful INQUIRY, read the last logical block address
+	  and block size of LUN 0 using the hardware transfer interrupt.
+	  Do not scan for disks or read any logical blocks.
+	  Leave disabled outside Grizzly diagnostic builds.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM

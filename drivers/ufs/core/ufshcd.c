@@ -11433,7 +11433,7 @@ static int ufshcd_link_query_device_init(struct ufs_hba *hba)
 	return ret;
 }
 
-static int ufshcd_link_submit_slot_irq(struct ufs_hba *hba)
+static int ufshcd_link_submit_slot_irq(struct ufs_hba *hba, const char *name)
 {
 	DECLARE_COMPLETION_ONSTACK(done);
 	u32 doorbell, irq_status;
@@ -11462,26 +11462,30 @@ static int ufshcd_link_submit_slot_irq(struct ufs_hba *hba)
 
 	if (completed) {
 		dma_rmb();
-		dev_info(hba->dev, "ufs-uic-v51 INQUIRY IRQ observed\n");
+		dev_info(hba->dev, "ufs-uic-v51 %s IRQ observed\n", name);
 		return 0;
 	}
 
 	doorbell = ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL);
 	irq_status = ufshcd_readl(hba, REG_INTERRUPT_STATUS);
 	dma_rmb();
-	dev_err(hba->dev, "ufs-uic-v51 INQUIRY IRQ timeout doorbell=%#x status=%#x OCS=%#x\n",
-		doorbell, irq_status, READ_ONCE(hba->utrdl_base_addr[0].header.ocs));
+	dev_err(hba->dev, "ufs-uic-v51 %s IRQ timeout doorbell=%#x status=%#x OCS=%#x\n",
+		name, doorbell, irq_status, READ_ONCE(hba->utrdl_base_addr[0].header.ocs));
 	if (doorbell & BIT(0)) {
 		int clear = ufshcd_clear_cmd(hba, 0);
 
-		dev_info(hba->dev, "ufs-uic-v51 INQUIRY timeout clear ret=%d\n", clear);
+		dev_info(hba->dev, "ufs-uic-v51 %s timeout clear ret=%d\n", name, clear);
 	}
 	return -ETIMEDOUT;
 }
 
-static int ufshcd_link_inquiry(struct ufs_hba *hba)
+enum {
+	UFS_LINK_INQUIRY_LEN = 36,
+	UFS_LINK_CAPACITY_LEN = 8,
+};
+
+static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 **payload)
 {
-	enum { inquiry_len = 36 };
 	bool irq = IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_INQUIRY_IRQ_DIAG);
 	struct utp_devman_cmd_desc *ucd = hba->devman_ucd_base_addr;
 	struct utp_transfer_req_desc *utrd = hba->utrdl_base_addr;
@@ -11489,30 +11493,48 @@ static int ufshcd_link_inquiry(struct ufs_hba *hba)
 	struct utp_upiu_rsp *rsp = (void *)ucd->response_upiu;
 	struct ufshcd_sg_entry *prd = (void *)ucd->prd_table;
 	dma_addr_t data_dma;
+	const char *name;
 	u8 *data;
+	u32 len;
 	int ret;
+
+	switch (opcode) {
+	case INQUIRY:
+		name = "INQUIRY";
+		len = UFS_LINK_INQUIRY_LEN;
+		break;
+	case READ_CAPACITY:
+		if (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_CAPACITY_DIAG) || !irq)
+			return -EOPNOTSUPP;
+		name = "READ CAPACITY(10)";
+		len = UFS_LINK_CAPACITY_LEN;
+		break;
+	default:
+		return -EINVAL;
+	}
 
 	if (hba->quirks & UFSHCD_QUIRK_PRDT_BYTE_GRAN ||
 	    ufshcd_sg_entry_size(hba) != sizeof(*prd))
 		return -EOPNOTSUPP;
 
 	/* Keep the data buffer with the other DMA allocations until shutdown. */
-	data = dmam_alloc_coherent(hba->dev, inquiry_len, &data_dma, GFP_KERNEL);
+	data = dmam_alloc_coherent(hba->dev, len, &data_dma, GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
 
-	memset(data, 0xff, inquiry_len);
+	memset(data, 0xff, len);
 	memset(req, 0, sizeof(*req));
 	memset(rsp, 0, sizeof(*rsp));
 	req->header.transaction_code = UPIU_TRANSACTION_COMMAND;
 	req->header.flags = UPIU_CMD_FLAGS_READ;
-	req->sc.exp_data_transfer_len = cpu_to_be32(inquiry_len);
-	req->sc.cdb[0] = INQUIRY;
-	req->sc.cdb[4] = inquiry_len;
+	req->sc.exp_data_transfer_len = cpu_to_be32(len);
+	req->sc.cdb[0] = opcode;
+	if (opcode == INQUIRY)
+		req->sc.cdb[4] = len;
 
 	*prd = (struct ufshcd_sg_entry) {
 		.addr = cpu_to_le64(data_dma),
-		.size = cpu_to_le32(inquiry_len - 1),
+		.size = cpu_to_le32(len - 1),
 	};
 	utrd->header = (struct request_desc_header) {
 		.command_type = UTP_CMD_TYPE_UFS_STORAGE,
@@ -11523,15 +11545,15 @@ static int ufshcd_link_inquiry(struct ufs_hba *hba)
 	utrd->prd_table_length = cpu_to_le16(1);
 
 	if (irq)
-		ret = ufshcd_link_submit_slot_irq(hba);
+		ret = ufshcd_link_submit_slot_irq(hba, name);
 	else
 		ret = ufshcd_link_submit_slot(hba);
 	if (ret)
 		return ret;
 
 	dev_info(hba->dev,
-		 "ufs-uic-v50 INQUIRY OCS=%#x type=%#x response=%#x status=%#x flags=%#x residual=%u\n",
-		 utrd->header.ocs, rsp->header.transaction_code, rsp->header.response,
+		 "ufs-uic-v53 %s OCS=%#x type=%#x response=%#x status=%#x flags=%#x residual=%u\n",
+		 name, utrd->header.ocs, rsp->header.transaction_code, rsp->header.response,
 		 rsp->header.status, rsp->header.flags,
 		 be32_to_cpu(rsp->sr.residual_transfer_count));
 	if ((utrd->header.ocs & MASK_OCS) != OCS_SUCCESS ||
@@ -11542,11 +11564,48 @@ static int ufshcd_link_inquiry(struct ufs_hba *hba)
 	    (rsp->header.flags & (UPIU_RSP_FLAG_UNDERFLOW | UPIU_RSP_FLAG_OVERFLOW)))
 		return -EIO;
 
+	*payload = data;
+	return 0;
+}
+
+static int ufshcd_link_inquiry(struct ufs_hba *hba)
+{
+	u8 *data;
+	int ret;
+
+	ret = ufshcd_link_scsi_read(hba, INQUIRY, &data);
+	if (ret)
+		return ret;
+
 	dev_info(hba->dev, "ufs-uic-v50 INQUIRY qualifier=%u type=%#x version=%#x format=%#x additional=%u\n",
 		 data[0] >> 5, data[0] & 0x1f, data[2], data[3] & 0xf, data[4]);
-	if (data[0] != TYPE_DISK || (data[3] & 0xf) != 2 || data[4] < inquiry_len - 5)
+	if (data[0] != TYPE_DISK || (data[3] & 0xf) != 2 || data[4] < UFS_LINK_INQUIRY_LEN - 5)
 		return -EPROTO;
 
+	return 0;
+}
+
+static int ufshcd_link_read_capacity(struct ufs_hba *hba)
+{
+	u32 last_lba, block_size;
+	u8 *data;
+	int ret;
+
+	ret = ufshcd_link_scsi_read(hba, READ_CAPACITY, &data);
+	if (ret)
+		return ret;
+
+	last_lba = get_unaligned_be32(data);
+	block_size = get_unaligned_be32(data + 4);
+	dev_info(hba->dev, "ufs-uic-v53 READ CAPACITY(10) geometry last_lba=%u block_size=%u\n",
+		 last_lba, block_size);
+	if (last_lba == U32_MAX)
+		return -EOVERFLOW;
+	if (block_size < 512 || block_size > 4096 || !is_power_of_2(block_size))
+		return -EPROTO;
+
+	dev_info(hba->dev, "ufs-uic-v53 READ CAPACITY(10) capacity_bytes=%llu\n",
+		 (last_lba + 1ULL) * block_size);
 	return 0;
 }
 
@@ -11593,6 +11652,10 @@ static int ufshcd_link_query_refclk(struct ufs_hba *hba)
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_SCSI_INQUIRY_DIAG)) {
 		ret = ufshcd_link_inquiry(hba);
 		dev_info(hba->dev, "ufs-uic-v50 INQUIRY result=%d\n", ret);
+	}
+	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_CAPACITY_DIAG)) {
+		ret = ufshcd_link_read_capacity(hba);
+		dev_info(hba->dev, "ufs-uic-v53 READ CAPACITY(10) result=%d\n", ret);
 	}
 
 	ufshcd_writel(hba, 0, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
