@@ -14,6 +14,7 @@
 #include <linux/nls.h>
 #include <linux/of.h>
 #include <linux/bitfield.h>
+#include <linux/bitmap.h>
 #include <linux/blk-pm.h>
 #include <linux/blkdev.h>
 #include <linux/clk.h>
@@ -11528,6 +11529,13 @@ enum {
 	UFS_LINK_INQUIRY_LEN = 36,
 	UFS_LINK_CAPACITY_LEN = 8,
 	UFS_LINK_GPT_MAX_BLOCKS = 4,
+	UFS_LINK_LUN_HEADER_LEN = 8,
+	UFS_LINK_REPORT_LUNS_LEN = UFS_LINK_LUN_HEADER_LEN + 16 * sizeof(struct scsi_lun),
+};
+
+struct ufs_link_payload {
+	u8 *data;
+	u32 received;
 };
 
 /* Return true for the current reset UNIT ATTENTION observed on D1. */
@@ -11557,7 +11565,7 @@ static bool ufshcd_link_log_sense(struct ufs_hba *hba, const char *name,
 }
 
 static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 blocks,
-				 u8 **payload, bool *retry)
+				 struct ufs_link_payload *payload, bool *retry)
 {
 	bool irq = IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_INQUIRY_IRQ_DIAG);
 	struct utp_devman_cmd_desc *ucd = hba->devman_ucd_base_addr;
@@ -11568,7 +11576,8 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 bloc
 	dma_addr_t data_dma;
 	const char *name;
 	u8 *data;
-	u32 len;
+	u8 lun = 0;
+	u32 len, residual;
 	int ret;
 
 	switch (opcode) {
@@ -11596,6 +11605,13 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 bloc
 		name = "READ(10)";
 		len = blocks * SZ_4K;
 		break;
+	case REPORT_LUNS:
+		if (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_REPORT_LUNS_DIAG) || !irq)
+			return -EOPNOTSUPP;
+		name = "REPORT LUNS";
+		lun = UFS_UPIU_REPORT_LUNS_WLUN;
+		len = UFS_LINK_REPORT_LUNS_LEN;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -11614,6 +11630,7 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 bloc
 	memset(rsp, 0, sizeof(*rsp));
 	req->header.transaction_code = UPIU_TRANSACTION_COMMAND;
 	req->header.flags = UPIU_CMD_FLAGS_READ;
+	req->header.lun = lun;
 	req->sc.exp_data_transfer_len = cpu_to_be32(len);
 	req->sc.cdb[0] = opcode;
 	if (opcode == INQUIRY)
@@ -11621,6 +11638,8 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 bloc
 	else if (opcode == READ_10) {
 		req->sc.cdb[5] = lba;
 		req->sc.cdb[8] = blocks;
+	} else if (opcode == REPORT_LUNS) {
+		put_unaligned_be32(len, &req->sc.cdb[6]);
 	}
 
 	*prd = (struct ufshcd_sg_entry) {
@@ -11642,14 +11661,14 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 bloc
 	if (ret)
 		return ret;
 
+	residual = be32_to_cpu(rsp->sr.residual_transfer_count);
 	dev_info(hba->dev,
 		 "ufs-uic-v53 %s OCS=%#x type=%#x response=%#x status=%#x flags=%#x residual=%u\n",
 		 name, utrd->header.ocs, rsp->header.transaction_code, rsp->header.response,
-		 rsp->header.status, rsp->header.flags,
-		 be32_to_cpu(rsp->sr.residual_transfer_count));
+		 rsp->header.status, rsp->header.flags, residual);
 	if ((utrd->header.ocs & MASK_OCS) != OCS_SUCCESS ||
 	    rsp->header.transaction_code != UPIU_TRANSACTION_RESPONSE ||
-	    rsp->header.lun || rsp->header.task_tag || rsp->header.ehs_length)
+	    rsp->header.lun != lun || rsp->header.task_tag || rsp->header.ehs_length)
 		return -EIO;
 	if (rsp->header.status == SAM_STAT_CHECK_CONDITION) {
 		bool reset_attention = ufshcd_link_log_sense(hba, name, rsp);
@@ -11659,22 +11678,32 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 bloc
 			*retry = true;
 	}
 	if (rsp->header.response || rsp->header.status != SAM_STAT_GOOD ||
-	    rsp->header.data_segment_length || rsp->sr.residual_transfer_count ||
-	    (rsp->header.flags & (UPIU_RSP_FLAG_UNDERFLOW | UPIU_RSP_FLAG_OVERFLOW)))
+	    rsp->header.data_segment_length || (rsp->header.flags & UPIU_RSP_FLAG_OVERFLOW))
 		return -EIO;
+	if (opcode == REPORT_LUNS) {
+		if (residual > len - UFS_LINK_LUN_HEADER_LEN ||
+		    !!(rsp->header.flags & UPIU_RSP_FLAG_UNDERFLOW) != !!residual)
+			return -EIO;
+	} else if (residual || (rsp->header.flags & UPIU_RSP_FLAG_UNDERFLOW)) {
+		return -EIO;
+	}
 
-	*payload = data;
+	payload->data = data;
+	payload->received = len - residual;
 	return 0;
 }
 
 static int ufshcd_link_inquiry(struct ufs_hba *hba)
 {
+	struct ufs_link_payload payload;
 	u8 *data;
 	int ret;
 
-	ret = ufshcd_link_scsi_read(hba, INQUIRY, 0, 0, &data, NULL);
+	ret = ufshcd_link_scsi_read(hba, INQUIRY, 0, 0, &payload, NULL);
 	if (ret)
 		return ret;
+
+	data = payload.data;
 
 	dev_info(hba->dev, "ufs-uic-v50 INQUIRY qualifier=%u type=%#x version=%#x format=%#x additional=%u\n",
 		 data[0] >> 5, data[0] & 0x1f, data[2], data[3] & 0xf, data[4]);
@@ -11689,16 +11718,19 @@ static int ufshcd_link_read_capacity(struct ufs_hba *hba, u32 *logical_block_siz
 {
 	u32 last_lba, block_size;
 	bool retry = false;
+	struct ufs_link_payload payload;
 	u8 *data;
 	int ret;
 
-	ret = ufshcd_link_scsi_read(hba, READ_CAPACITY, 0, 0, &data, &retry);
+	ret = ufshcd_link_scsi_read(hba, READ_CAPACITY, 0, 0, &payload, &retry);
 	if (retry) {
 		dev_info(hba->dev, "ufs-uic-v55 READ CAPACITY(10) retry after current reset UNIT ATTENTION\n");
-		ret = ufshcd_link_scsi_read(hba, READ_CAPACITY, 0, 0, &data, NULL);
+		ret = ufshcd_link_scsi_read(hba, READ_CAPACITY, 0, 0, &payload, NULL);
 	}
 	if (ret)
 		return ret;
+
+	data = payload.data;
 
 	last_lba = get_unaligned_be32(data);
 	block_size = get_unaligned_be32(data + 4);
@@ -11721,15 +11753,18 @@ static int ufshcd_link_read_capacity(struct ufs_hba *hba, u32 *logical_block_siz
 static int ufshcd_link_read_lba0(struct ufs_hba *hba, u32 logical_block_size)
 {
 	bool dma_changed, mbr_signature;
+	struct ufs_link_payload payload;
 	u8 *data;
 	int ret;
 
 	if (logical_block_size != SZ_4K)
 		return -EPROTO;
 
-	ret = ufshcd_link_scsi_read(hba, READ_10, 0, 1, &data, NULL);
+	ret = ufshcd_link_scsi_read(hba, READ_10, 0, 1, &payload, NULL);
 	if (ret)
 		return ret;
+
+	data = payload.data;
 
 	dma_changed = memchr_inv(data, 0xff, SZ_4K);
 	mbr_signature = data[510] == 0x55 && data[511] == 0xaa;
@@ -11766,6 +11801,7 @@ static int ufshcd_link_read_gpt_entries(struct ufs_hba *hba, const u8 *header, u
 	u32 count = get_unaligned_le32(header + 80);
 	u32 entry_size = get_unaligned_le32(header + 84);
 	u32 bytes, blocks, expected_crc;
+	struct ufs_link_payload payload;
 	u8 *data;
 	int ret;
 
@@ -11779,9 +11815,11 @@ static int ufshcd_link_read_gpt_entries(struct ufs_hba *hba, const u8 *header, u
 	expected_crc = get_unaligned_le32(header + 88);
 	dev_info(hba->dev, "ufs-uic-v58 GPT entry-array read blocks=%u crc_bytes=%u\n",
 		 blocks, bytes);
-	ret = ufshcd_link_scsi_read(hba, READ_10, 2, blocks, &data, NULL);
+	ret = ufshcd_link_scsi_read(hba, READ_10, 2, blocks, &payload, NULL);
 	if (ret)
 		return ret;
+
+	data = payload.data;
 
 	ret = ~crc32_le(~0U, data, bytes) == expected_crc ? 0 : -EBADMSG;
 	memzero_explicit(data, blocks * SZ_4K);
@@ -11790,20 +11828,64 @@ static int ufshcd_link_read_gpt_entries(struct ufs_hba *hba, const u8 *header, u
 
 static int ufshcd_link_read_gpt_header(struct ufs_hba *hba, u32 last_lba)
 {
-	u8 *data = NULL;
+	struct ufs_link_payload payload = {};
 	int ret;
 
-	ret = ufshcd_link_scsi_read(hba, READ_10, 1, 1, &data, NULL);
+	ret = ufshcd_link_scsi_read(hba, READ_10, 1, 1, &payload, NULL);
 	if (!ret)
-		ret = ufshcd_link_validate_gpt_header(data);
+		ret = ufshcd_link_validate_gpt_header(payload.data);
 	dev_info(hba->dev, "ufs-uic-v57 READ(10) LUN 0 LBA 1 GPT header result=%d\n", ret);
 
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_ENTRIES_DIAG)) {
-		ret = ufshcd_link_read_gpt_entries(hba, data, last_lba);
+		ret = ufshcd_link_read_gpt_entries(hba, payload.data, last_lba);
 		dev_info(hba->dev, "ufs-uic-v58 READ(10) LUN 0 LBA 2 GPT entries result=%d\n", ret);
 	}
-	if (data)
-		memzero_explicit(data, SZ_4K);
+	if (payload.data)
+		memzero_explicit(payload.data, SZ_4K);
+	return ret;
+}
+
+static int ufshcd_link_check_lun_list(struct ufs_hba *hba, const struct ufs_link_payload *payload)
+{
+	DECLARE_BITMAP(luns, UFS_UPIU_MAX_UNIT_NUM_ID + 1);
+	const u8 *entry = payload->data + UFS_LINK_LUN_HEADER_LEN;
+	u32 list_bytes, offset;
+
+	if (payload->received < UFS_LINK_LUN_HEADER_LEN)
+		return -EPROTO;
+	list_bytes = get_unaligned_be32(payload->data);
+	if (!list_bytes || list_bytes > payload->received - UFS_LINK_LUN_HEADER_LEN ||
+	    list_bytes % sizeof(struct scsi_lun))
+		return -EPROTO;
+
+	bitmap_zero(luns, UFS_UPIU_MAX_UNIT_NUM_ID + 1);
+	for (offset = 0; offset < list_bytes; offset += sizeof(struct scsi_lun)) {
+		const u8 *lun = entry + offset;
+
+		if (lun[0] || lun[1] > UFS_UPIU_MAX_UNIT_NUM_ID ||
+		    memchr_inv(lun + 2, 0, sizeof(struct scsi_lun) - 2) ||
+		    test_and_set_bit(lun[1], luns))
+			return -EPROTO;
+	}
+	if (!test_bit(0, luns))
+		return -ENODEV;
+
+	dev_info(hba->dev, "ufs-uic-v60 REPORT LUNS bytes=%u list_bytes=%u luns=%*pbl\n",
+		 payload->received, list_bytes, UFS_UPIU_MAX_UNIT_NUM_ID + 1, luns);
+	return 0;
+}
+
+static int ufshcd_link_report_luns(struct ufs_hba *hba)
+{
+	struct ufs_link_payload payload;
+	int ret;
+
+	ret = ufshcd_link_scsi_read(hba, REPORT_LUNS, 0, 0, &payload, NULL);
+	if (ret)
+		return ret;
+
+	ret = ufshcd_link_check_lun_list(hba, &payload);
+	memzero_explicit(payload.data, UFS_LINK_REPORT_LUNS_LEN);
 	return ret;
 }
 
@@ -11861,6 +11943,10 @@ static int ufshcd_link_query_refclk(struct ufs_hba *hba)
 	}
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_HEADER_DIAG))
 		ret = ufshcd_link_read_gpt_header(hba, last_lba);
+	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_REPORT_LUNS_DIAG)) {
+		ret = ufshcd_link_report_luns(hba);
+		dev_info(hba->dev, "ufs-uic-v60 REPORT LUNS result=%d\n", ret);
+	}
 
 	ufshcd_writel(hba, 0, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
 	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) && !ret)

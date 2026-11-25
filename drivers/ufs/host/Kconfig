@@ -146,6 +146,15 @@ config SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG
 	  discovered devices, then remove it before HCI cleanup.
 	  Leave disabled outside Grizzly diagnostic builds.
 
+config SCSI_UFS_MALIBU_REPORT_LUNS_DIAG
+	bool "Test Grizzly REPORT LUNS without scanning"
+	depends on SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG
+	help
+	  After the guarded reads, request the ordinary LUN list from
+	  the REPORT LUNS well-known LUN. Validate and log LUN numbers
+	  without attaching disks or issuing a command to another LUN.
+	  Leave disabled outside Grizzly diagnostic builds.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM
