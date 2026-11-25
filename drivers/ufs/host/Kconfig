@@ -82,6 +82,15 @@ config SCSI_UFS_MALIBU_DEVICE_INIT_DIAG
 	  the link-only teardown and do not enumerate any LUNs.
 	  Leave disabled outside Grizzly diagnostic builds.
 
+config SCSI_UFS_MALIBU_SCSI_INQUIRY_DIAG
+	bool "Test one Grizzly SCSI INQUIRY before discovery"
+	depends on SCSI_UFS_MALIBU_DEVICE_INIT_DIAG
+	help
+	  After the device clears fDeviceInit, send a standard 36-byte
+	  INQUIRY to LUN 0 over the polled link diagnostic slot. Validate
+	  the response without registering a SCSI host or scanning for disks.
+	  Leave disabled outside Grizzly diagnostic builds.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM
