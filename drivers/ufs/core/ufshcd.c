@@ -55,7 +55,10 @@ enum {
 };
 
 enum { UFS_LINK_INQUIRY_LEN = 36 };
-enum { UFS_LINK_BOOT_B_BLOCK = 1 };
+enum {
+	UFS_LINK_BOOT_B_BLOCK = 1,
+	UFS_LINK_BOOT_B_BLOCKS = 2,
+};
 
 static const u8 ufshcd_link_lun_cdb[6] = { INQUIRY, 0, 0, 0, UFS_LINK_INQUIRY_LEN, 0 };
 
@@ -3129,6 +3132,11 @@ static u32 ufshcd_link_read_lba(struct ufs_hba *hba)
 #endif
 }
 
+static unsigned int ufshcd_link_read_blocks(void)
+{
+	return IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_PARTITION_READ_DIAG) ? UFS_LINK_BOOT_B_BLOCKS : 1;
+}
+
 static bool ufshcd_link_disk_read(struct ufs_hba *hba, struct scsi_cmnd *cmd, u32 lba)
 {
 #ifdef CONFIG_SCSI_UFS_MALIBU_BLOCK_READ_DIAG
@@ -3139,7 +3147,7 @@ static bool ufshcd_link_disk_read(struct ufs_hba *hba, struct scsi_cmnd *cmd, u3
 	    rq->q->disk != bio->bi_bdev->bd_disk || !bdev_read_only(bio->bi_bdev) ||
 	    cmd->device->sdev_state != SDEV_RUNNING || req_op(rq) != REQ_OP_READ ||
 	    blk_rq_pos(rq) != (sector_t)lba * (SZ_4K / SECTOR_SIZE) ||
-	    blk_rq_bytes(rq) != SZ_4K)
+	    blk_rq_bytes(rq) != ufshcd_link_read_blocks() * SZ_4K)
 		return false;
 
 	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_PARTITION_READ_DIAG))
@@ -3239,7 +3247,7 @@ static enum scsi_qc_status ufshcd_queuecommand(struct Scsi_Host *host,
 		/* Pairs with publication of the private GPT read bio. */
 		int phase = smp_load_acquire(&hba->link_scsi_phase);
 		bool read = phase == UFS_LINK_SCSI_READ_ARMED;
-		u8 read_cdb[10] = { READ_10, 0, 0, 0, 0, 0, 0, 0, 1, 0 };
+		u8 read_cdb[10] = { READ_10 };
 		const u8 *cdb = read ? read_cdb : ufshcd_link_lun_cdb;
 		unsigned int len = read ? sizeof(read_cdb) : sizeof(ufshcd_link_lun_cdb);
 		int armed = read ? UFS_LINK_SCSI_READ_ARMED : UFS_LINK_SCSI_ARMED;
@@ -3249,9 +3257,11 @@ static enum scsi_qc_status ufshcd_queuecommand(struct Scsi_Host *host,
 		bool request = read ? ufshcd_link_disk_read(hba, cmd, lba) :
 			       cmd->device->sdev_state == SDEV_CREATED;
 
-		if (read)
+		if (read) {
 			put_unaligned_be32(lba, read_cdb + 2);
-		diag_bytes = read ? SZ_4K : UFS_LINK_INQUIRY_LEN;
+			put_unaligned_be16(ufshcd_link_read_blocks(), read_cdb + 7);
+		}
+		diag_bytes = read ? ufshcd_link_read_blocks() * SZ_4K : UFS_LINK_INQUIRY_LEN;
 		if (!target || !request || phase != armed ||
 		    scsi_bufflen(cmd) != diag_bytes || cmd->sc_data_direction != DMA_FROM_DEVICE ||
 		    scsi_sg_count(cmd) != 1 || cmd->cmd_len != len || memcmp(cmd->cmnd, cdb, len) ||
@@ -11571,8 +11581,9 @@ static int ufshcd_link_read_block(struct ufs_hba *hba, struct block_device *bdev
 #ifdef CONFIG_SCSI_UFS_MALIBU_BLOCK_READ_DIAG
 	struct request_queue *queue = bdev->bd_disk->queue;
 	unsigned int timeout = queue->rq_timeout;
+	unsigned int bytes = ufshcd_link_read_blocks() * SZ_4K;
 	unsigned int i;
-	struct page *page;
+	struct folio *folio;
 	struct bio *bio;
 	u8 *data;
 	int ret, stop;
@@ -11580,25 +11591,25 @@ static int ufshcd_link_read_block(struct ufs_hba *hba, struct block_device *bdev
 	if (!reference)
 		return -EINVAL;
 
-	page = alloc_page(GFP_NOIO | __GFP_ZERO);
-	if (!page)
+	folio = folio_alloc(GFP_NOIO | __GFP_ZERO, get_order(bytes));
+	if (!folio)
 		return -ENOMEM;
 	bio = bio_alloc(bdev, 1, REQ_OP_READ | REQ_SYNC | REQ_NOMERGE, GFP_NOIO);
 	if (!bio) {
 		ret = -ENOMEM;
-		goto free_page;
+		goto free_folio;
 	}
 	if (bdev_is_partition(bdev))
 		bio->bi_iter.bi_sector = UFS_LINK_BOOT_B_BLOCK * (SZ_4K / SECTOR_SIZE);
 	else
 		bio->bi_iter.bi_sector = SZ_4K / SECTOR_SIZE;
-	if (bio_add_page(bio, page, SZ_4K, 0) != SZ_4K) {
+	if (!bio_add_folio(bio, folio, bytes, 0)) {
 		ret = -EIO;
 		goto put_bio;
 	}
 
-	data = page_address(page);
-	for (i = 0; i < SZ_4K; i++)
+	data = folio_address(folio);
+	for (i = 0; i < bytes; i++)
 		data[i] = ~reference[i];
 
 	ret = ufshcd_link_start_scsi(hba);
@@ -11619,16 +11630,16 @@ static int ufshcd_link_read_block(struct ufs_hba *hba, struct block_device *bdev
 	blk_queue_rq_timeout(queue, timeout);
 	if (!ret)
 		ret = stop;
-	if (!ret && memcmp(data, reference, SZ_4K))
+	if (!ret && memcmp(data, reference, bytes))
 		ret = -EBADMSG;
-	dev_info(hba->dev, "ufs-uic-v72 LUN 0 block comparison part=%u lba=%u bytes=%u ret=%d\n",
-		 bdev_partno(bdev), ufshcd_link_read_lba(hba), SZ_4K, ret);
+	dev_info(hba->dev, "ufs-uic-v73 LUN 0 block comparison part=%u lba=%u bytes=%u ret=%d\n",
+		 bdev_partno(bdev), ufshcd_link_read_lba(hba), bytes, ret);
 
 put_bio:
 	bio_put(bio);
-free_page:
-	memzero_explicit(page_address(page), SZ_4K);
-	__free_page(page);
+free_folio:
+	memzero_explicit(folio_address(folio), bytes);
+	folio_put(folio);
 	return ret;
 #else
 	return 0;
@@ -12101,6 +12112,17 @@ static bool ufshcd_link_log_sense(struct ufs_hba *hba, const char *name,
 	       hdr.sense_key == UNIT_ATTENTION && hdr.asc == 0x29 && hdr.ascq == 0;
 }
 
+#ifdef CONFIG_SCSI_UFS_MALIBU_PARTITION_READ_DIAG
+static bool ufshcd_link_reference_allowed(struct ufs_hba *hba, u32 lba, u8 blocks)
+{
+	unsigned int end = UFS_LINK_BOOT_B_BLOCK + UFS_LINK_BOOT_B_BLOCKS;
+
+	return hba->link_diag_partno && hba->link_diag_part_blocks >= end &&
+	       blocks == 1 && lba >= hba->link_diag_part_start &&
+	       lba - hba->link_diag_part_start < end;
+}
+#endif
+
 static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u32 lba, u8 blocks,
 				 struct ufs_link_payload *payload, bool *retry)
 {
@@ -12123,9 +12145,7 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u32 lba, u8 blo
 	backup_header = lba > 2 && lba == hba->link_gpt_last_lba;
 #endif
 #ifdef CONFIG_SCSI_UFS_MALIBU_PARTITION_READ_DIAG
-	partition_block = hba->link_diag_partno &&
-			  hba->link_diag_part_blocks > UFS_LINK_BOOT_B_BLOCK &&
-			  (lba == hba->link_diag_part_start || lba == ufshcd_link_read_lba(hba));
+	partition_block = ufshcd_link_reference_allowed(hba, lba, blocks);
 #endif
 	switch (opcode) {
 	case INQUIRY:
@@ -12471,6 +12491,7 @@ static int ufshcd_link_read_boot_b(struct ufs_hba *hba, const u8 *entries, u32 c
 {
 #ifdef CONFIG_SCSI_UFS_MALIBU_PARTITION_READ_DIAG
 	struct ufs_link_payload payload;
+	u32 lba, i;
 	int ret;
 
 	if (!reference)
@@ -12488,14 +12509,17 @@ static int ufshcd_link_read_boot_b(struct ufs_hba *hba, const u8 *entries, u32 c
 	if (ret)
 		return ret;
 
-	ret = ufshcd_link_scsi_read(hba, READ_10, ufshcd_link_read_lba(hba), 1, &payload, NULL);
-	if (ret)
-		return ret;
+	lba = ufshcd_link_read_lba(hba);
+	for (i = 0; i < UFS_LINK_BOOT_B_BLOCKS; i++) {
+		ret = ufshcd_link_scsi_read(hba, READ_10, lba + i, 1, &payload, NULL);
+		if (ret)
+			return ret;
 
-	memcpy(reference, payload.data, SZ_4K);
-	memzero_explicit(payload.data, SZ_4K);
-	dev_info(hba->dev, "ufs-uic-v72 direct boot_b partition=%u block=%u lba=%u bytes=%u\n",
-		 hba->link_diag_partno, UFS_LINK_BOOT_B_BLOCK, ufshcd_link_read_lba(hba), SZ_4K);
+		memcpy(reference + i * SZ_4K, payload.data, SZ_4K);
+		memzero_explicit(payload.data, SZ_4K);
+	}
+	dev_info(hba->dev, "ufs-uic-v73 direct boot_b part=%u block=%u lba=%u blocks=%u\n",
+		 hba->link_diag_partno, UFS_LINK_BOOT_B_BLOCK, lba, UFS_LINK_BOOT_B_BLOCKS);
 	return 0;
 #else
 	return 0;
@@ -12683,7 +12707,7 @@ static int ufshcd_link_run_diagnostics(struct ufs_hba *hba)
 	int ret;
 
 	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_BLOCK_READ_DIAG)) {
-		reference = kmalloc(SZ_4K, GFP_KERNEL);
+		reference = kmalloc(ufshcd_link_read_blocks() * SZ_4K, GFP_KERNEL);
 		if (!reference)
 			return -ENOMEM;
 	}
