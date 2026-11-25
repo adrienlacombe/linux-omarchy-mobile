@@ -54,6 +54,16 @@ config SCSI_UFS_MALIBU
 
 	  If unsure, say N.
 
+config SCSI_UFS_MALIBU_HIBERN8_GATING_DIAG
+	bool "Test stock Grizzly M-PHY Hibern8 gating"
+	depends on SCSI_UFS_MALIBU && COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_PREP_RELEASE
+	help
+	  Apply the stock D1 local M-PHY Hibern8 gating attribute
+	  after link startup and test one explicit Hibern8 entry.
+	  Keep the existing Deep H8 release guard and leave the host
+	  without transfer queues or SCSI devices.
+	  Leave disabled except when testing Grizzly diagnostics.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM
