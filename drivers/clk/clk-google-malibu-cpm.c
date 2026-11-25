@@ -1138,6 +1138,47 @@ out:
 	return ret;
 }
 
+static int malibu_ufs_prep_off_status(struct malibu_cpm *cpm,
+				      struct malibu_ufs_psm_sample *sample)
+{
+	malibu_ufs_sample_psms(&cpm->ufs_psm, sample);
+	if (!sample->children_valid)
+		return -EHOSTDOWN;
+	if ((sample->phy & 0x1f) != 0x11)
+		return -EIO;
+
+	switch (sample->hc & 0x1f) {
+	case 0x13:
+		return 0;
+	case 0x10:
+		return -EINPROGRESS;
+	default:
+		return -EIO;
+	}
+}
+
+static bool malibu_ufs_wait_prep_off(struct malibu_cpm *cpm)
+{
+	struct malibu_ufs_psm_sample initial = {}, final;
+	ktime_t start = ktime_get();
+	s64 elapsed_us;
+	int status, ret = 0;
+
+	status = malibu_ufs_prep_off_status(cpm, &initial);
+	final = initial;
+	if (status == -EINPROGRESS)
+		ret = read_poll_timeout(malibu_ufs_prep_off_status, status,
+					status != -EINPROGRESS, 20, 10000,
+					true, cpm, &final);
+	elapsed_us = ktime_us_delta(ktime_get(), start);
+	malibu_ufs_log_psms(cpm->dev, "ufs-uic-v45 prep-off-initial", &initial);
+	malibu_ufs_log_psms(cpm->dev, "ufs-uic-v40 prep-off-after", &final);
+	dev_info(cpm->dev, "ufs-uic-v45 prep OFF settling elapsed_us=%lld qualification=%d\n",
+		 elapsed_us, ret ?: status);
+
+	return !ret && !status;
+}
+
 static int malibu_ufs_idle_power_off(struct malibu_cpm_domain *domain)
 {
 	struct malibu_cpm *cpm = domain->cpm;
@@ -1168,7 +1209,7 @@ static int malibu_ufs_idle_power_off(struct malibu_cpm_domain *domain)
 	if (ret)
 		goto out;
 	domain->powered_here = false;
-	if (malibu_ufs_idle_sample(cpm, "ufs-uic-v40 prep-off-after", 3))
+	if (malibu_ufs_wait_prep_off(cpm))
 		WRITE_ONCE(cpm->ufs_idle_stage, MALIBU_UFS_IDLE_RELEASED);
 out:
 	dev_info(cpm->dev, "ufs-uic-v40 domain=%s off owned_before=%d owned_after=%d ret=%d\n",
