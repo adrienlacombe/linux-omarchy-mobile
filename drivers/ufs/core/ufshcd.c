@@ -55,6 +55,7 @@ enum {
 };
 
 enum { UFS_LINK_INQUIRY_LEN = 36 };
+enum { UFS_LINK_BOOT_B_BLOCK = 1 };
 
 static const u8 ufshcd_link_lun_cdb[6] = { INQUIRY, 0, 0, 0, UFS_LINK_INQUIRY_LEN, 0 };
 
@@ -3122,7 +3123,7 @@ static bool ufshcd_link_lun_target(const struct ufs_hba *hba, const struct scsi_
 static u32 ufshcd_link_read_lba(struct ufs_hba *hba)
 {
 #ifdef CONFIG_SCSI_UFS_MALIBU_PARTITION_READ_DIAG
-	return hba->link_diag_part_start;
+	return hba->link_diag_part_start + UFS_LINK_BOOT_B_BLOCK;
 #else
 	return 1;
 #endif
@@ -3143,7 +3144,8 @@ static bool ufshcd_link_disk_read(struct ufs_hba *hba, struct scsi_cmnd *cmd, u3
 
 	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_PARTITION_READ_DIAG))
 		return bdev_is_partition(bio->bi_bdev) && bio_flagged(bio, BIO_REMAPPED) &&
-		       get_start_sect(bio->bi_bdev) == blk_rq_pos(rq);
+		       get_start_sect(bio->bi_bdev) +
+		       UFS_LINK_BOOT_B_BLOCK * (SZ_4K / SECTOR_SIZE) == blk_rq_pos(rq);
 	return bio->bi_bdev == rq->q->disk->part0;
 #else
 	return false;
@@ -11586,7 +11588,9 @@ static int ufshcd_link_read_block(struct ufs_hba *hba, struct block_device *bdev
 		ret = -ENOMEM;
 		goto free_page;
 	}
-	if (!bdev_is_partition(bdev))
+	if (bdev_is_partition(bdev))
+		bio->bi_iter.bi_sector = UFS_LINK_BOOT_B_BLOCK * (SZ_4K / SECTOR_SIZE);
+	else
 		bio->bi_iter.bi_sector = SZ_4K / SECTOR_SIZE;
 	if (bio_add_page(bio, page, SZ_4K, 0) != SZ_4K) {
 		ret = -EIO;
@@ -11617,7 +11621,7 @@ static int ufshcd_link_read_block(struct ufs_hba *hba, struct block_device *bdev
 		ret = stop;
 	if (!ret && memcmp(data, reference, SZ_4K))
 		ret = -EBADMSG;
-	dev_info(hba->dev, "ufs-uic-v71 LUN 0 block comparison part=%u lba=%u bytes=%u ret=%d\n",
+	dev_info(hba->dev, "ufs-uic-v72 LUN 0 block comparison part=%u lba=%u bytes=%u ret=%d\n",
 		 bdev_partno(bdev), ufshcd_link_read_lba(hba), SZ_4K, ret);
 
 put_bio:
@@ -12119,7 +12123,9 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u32 lba, u8 blo
 	backup_header = lba > 2 && lba == hba->link_gpt_last_lba;
 #endif
 #ifdef CONFIG_SCSI_UFS_MALIBU_PARTITION_READ_DIAG
-	partition_block = hba->link_diag_partno && lba == hba->link_diag_part_start;
+	partition_block = hba->link_diag_partno &&
+			  hba->link_diag_part_blocks > UFS_LINK_BOOT_B_BLOCK &&
+			  (lba == hba->link_diag_part_start || lba == ufshcd_link_read_lba(hba));
 #endif
 	switch (opcode) {
 	case INQUIRY:
@@ -12478,12 +12484,19 @@ static int ufshcd_link_read_boot_b(struct ufs_hba *hba, const u8 *entries, u32 c
 
 	if (memcmp(payload.data, "ANDROID!", 8))
 		ret = -EPROTO;
-	else
-		memcpy(reference, payload.data, SZ_4K);
 	memzero_explicit(payload.data, SZ_4K);
-	dev_info(hba->dev, "ufs-uic-v71 direct boot_b first block partition=%u lba=%u bytes=%u ret=%d\n",
-		 hba->link_diag_partno, hba->link_diag_part_start, SZ_4K, ret);
-	return ret;
+	if (ret)
+		return ret;
+
+	ret = ufshcd_link_scsi_read(hba, READ_10, ufshcd_link_read_lba(hba), 1, &payload, NULL);
+	if (ret)
+		return ret;
+
+	memcpy(reference, payload.data, SZ_4K);
+	memzero_explicit(payload.data, SZ_4K);
+	dev_info(hba->dev, "ufs-uic-v72 direct boot_b partition=%u block=%u lba=%u bytes=%u\n",
+		 hba->link_diag_partno, UFS_LINK_BOOT_B_BLOCK, ufshcd_link_read_lba(hba), SZ_4K);
+	return 0;
 #else
 	return 0;
 #endif
