@@ -48,7 +48,7 @@ struct ufs_malibu {
 	struct ufs_malibu_device device;
 	struct clk *deep_h8;
 	void __iomem *psm_hci;
-	int deep_h8_release_result;
+	int deep_h8_qualification_result;
 };
 
 int ufs_malibu_device_init_gpios(struct ufs_malibu_device *device);

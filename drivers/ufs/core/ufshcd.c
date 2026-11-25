@@ -11221,9 +11221,13 @@ remove_scsi_host:
 	return err;
 }
 
-static void ufshcd_abort_init(struct ufs_hba *hba)
+static void ufshcd_abort_init(struct ufs_hba *hba, bool link_only)
 {
 	bool scan_pending = hba->scsi_host_added;
+	bool trace_cleanup = link_only && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_HIBERN8_GATING_DIAG);
+
+	if (trace_cleanup)
+		dev_info(hba->dev, "ufs-uic-v47 HCI cleanup start\n");
 
 	/* Prevent recovery and clock gating while the failed probe unwinds. */
 	scoped_guard(spinlock_irq, hba->host->host_lock)
@@ -11232,10 +11236,20 @@ static void ufshcd_abort_init(struct ufs_hba *hba)
 	disable_work_sync(&hba->eeh_work);
 
 	ufshcd_hold(hba);
+	if (trace_cleanup)
+		dev_info(hba->dev, "ufs-uic-v47 HCI interrupt mask write\n");
 	ufshcd_writel(hba, 0, REG_INTERRUPT_ENABLE);
+	if (trace_cleanup)
+		dev_info(hba->dev, "ufs-uic-v47 HCI interrupt mask readback\n");
 	ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
+	if (trace_cleanup)
+		dev_info(hba->dev, "ufs-uic-v47 HCI stop begin\n");
 	ufshcd_hba_stop(hba);
+	if (trace_cleanup)
+		dev_info(hba->dev, "ufs-uic-v47 HCI stop returned; freeing IRQ\n");
 	devm_free_irq(hba->dev, hba->irq, hba);
+	if (trace_cleanup)
+		dev_info(hba->dev, "ufs-uic-v47 HCI IRQ freed\n");
 	hba->is_irq_enabled = false;
 	ufshcd_release_mcq_esi(hba);
 	ufshcd_release(hba);
@@ -11572,7 +11586,7 @@ out_error:
 			err = hibern8_err;
 	}
 	if (abort_init)
-		ufshcd_abort_init(hba);
+		ufshcd_abort_init(hba, link_only);
 	if (exit_hba)
 		ufshcd_hba_exit(hba, link_only);
 	return err > 0 ? -EIO : err;

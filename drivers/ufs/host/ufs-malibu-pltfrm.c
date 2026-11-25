@@ -548,13 +548,18 @@ static void ufs_malibu_before_hci_stop(struct ufs_hba *hba, int link, int hibern
 	ret = read_poll_timeout(ufs_malibu_psms_off, off, off, 5, 10000, false,
 				ufs, &status);
 	elapsed_us = div_u64(ktime_get_ns() - start_ns, NSEC_PER_USEC);
-	ufs->deep_h8_release_result = ret;
+	ufs->deep_h8_qualification_result = ret;
 	dev_info(hba->dev, "ufs-uic-v44 Deep H8 poll initial HC=%#x PHY=%#x elapsed_us=%llu\n",
 		 initial.hci, initial.phy, elapsed_us);
 	dev_info(hba->dev, "ufs-uic-v36 Deep H8 gate: HC=%#x PHY=%#x ret=%d\n",
 		 status.hci, status.phy, ret);
 	if (ret)
 		return;
+
+	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_HIBERN8_GATING_DIAG)) {
+		dev_info(hba->dev, "ufs-uic-v47 Deep H8 qualified; keeping clock prepared\n");
+		return;
+	}
 
 	/* Keep the core clock, domains and device powered for this LPCM request. */
 	clk_unprepare(ufs->deep_h8);
@@ -766,7 +771,7 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 		goto hold;
 
 	phase = "link-hibern8";
-	ufs->deep_h8_release_result = -ECANCELED;
+	ufs->deep_h8_qualification_result = -ECANCELED;
 	ret = ufshcd_probe_link_hibern8(hba, hci, irq, ufs_malibu_before_hci_stop);
 	if (ret)
 		goto hold;
@@ -778,7 +783,7 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 			 stopped.hci, stopped.phy);
 	}
 	phase = "deep-h8-qualification";
-	ret = ufs->deep_h8_release_result;
+	ret = ufs->deep_h8_qualification_result;
 	if (ret)
 		goto hold;
 	phase = "hci-stop";
