@@ -11484,6 +11484,29 @@ enum {
 	UFS_LINK_CAPACITY_LEN = 8,
 };
 
+static void ufshcd_link_log_sense(struct ufs_hba *hba, const char *name,
+				  const struct utp_upiu_rsp *rsp)
+{
+	const u8 *sense = rsp->sr.sense_data;
+	u16 segment_len = be16_to_cpu(rsp->header.data_segment_length);
+	u16 sense_len = be16_to_cpu(rsp->sr.sense_data_len);
+	struct scsi_sense_hdr hdr;
+
+	if (sense_len < 8 || sense_len > sizeof(rsp->sr.sense_data) ||
+	    segment_len < sizeof(rsp->sr.sense_data_len) + sense_len ||
+	    segment_len > sizeof(rsp->sr.sense_data_len) + sizeof(rsp->sr.sense_data) ||
+	    !scsi_normalize_sense(sense, sense_len, &hdr) || hdr.response_code > 0x73 ||
+	    (hdr.response_code < 0x72 && (sense_len < 14 || sense[7] < 6))) {
+		dev_info(hba->dev, "ufs-uic-v54 %s CHECK CONDITION sense unavailable segment=%u len=%u\n",
+			 name, segment_len, sense_len);
+		return;
+	}
+
+	dev_info(hba->dev,
+		 "ufs-uic-v54 %s CHECK CONDITION sense format=%#x key=%#x asc=%#x ascq=%#x len=%u\n",
+		 name, hdr.response_code, hdr.sense_key, hdr.asc, hdr.ascq, sense_len);
+}
+
 static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 **payload)
 {
 	bool irq = IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_INQUIRY_IRQ_DIAG);
@@ -11558,8 +11581,11 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 **payload)
 		 be32_to_cpu(rsp->sr.residual_transfer_count));
 	if ((utrd->header.ocs & MASK_OCS) != OCS_SUCCESS ||
 	    rsp->header.transaction_code != UPIU_TRANSACTION_RESPONSE ||
-	    rsp->header.lun || rsp->header.task_tag || rsp->header.response ||
-	    rsp->header.status != SAM_STAT_GOOD || rsp->header.ehs_length ||
+	    rsp->header.lun || rsp->header.task_tag || rsp->header.ehs_length)
+		return -EIO;
+	if (rsp->header.status == SAM_STAT_CHECK_CONDITION)
+		ufshcd_link_log_sense(hba, name, rsp);
+	if (rsp->header.response || rsp->header.status != SAM_STAT_GOOD ||
 	    rsp->header.data_segment_length || rsp->sr.residual_transfer_count ||
 	    (rsp->header.flags & (UPIU_RSP_FLAG_UNDERFLOW | UPIU_RSP_FLAG_OVERFLOW)))
 		return -EIO;
