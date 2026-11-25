@@ -1080,6 +1080,9 @@ enum ufshcd_mcq_opr {
  * @link_gpt_entry_blocks: checked size of a GPT entry array in blocks
  * @link_gpt_partitions: used entries in the validated primary array
  * @link_gpt_failed: whether any GPT scan request was refused or failed
+ * @link_diag_part_start: validated start LBA of the diagnostic partition
+ * @link_diag_part_blocks: validated length in blocks of the diagnostic partition
+ * @link_diag_partno: validated GPT slot plus one for the diagnostic partition
  * @link_diag_read_bio: exact block request permitted by the GPT diagnostic
  * @link_diag_ro_blocks: live capacity in 4 KiB blocks for the disk diagnostic
  * @link_scsi_phase: one-command dispatch state for the SCSI midlayer test
@@ -1275,8 +1278,13 @@ struct ufs_hba {
 #ifdef CONFIG_SCSI_UFS_MALIBU_RO_DISK_DIAG
 	u64 link_diag_ro_blocks;
 #endif
-#ifdef CONFIG_SCSI_UFS_MALIBU_RO_DISK_READ_DIAG
+#ifdef CONFIG_SCSI_UFS_MALIBU_BLOCK_READ_DIAG
 	struct bio *link_diag_read_bio;
+#endif
+#ifdef CONFIG_SCSI_UFS_MALIBU_PARTITION_READ_DIAG
+	u32 link_diag_part_start;
+	u32 link_diag_part_blocks;
+	u8 link_diag_partno;
 #endif
 #ifdef CONFIG_SCSI_UFS_MALIBU_GPT_SCAN_DIAG
 	unsigned long link_gpt_reads;

@@ -195,6 +195,18 @@ config SCSI_UFS_MALIBU_GPT_SCAN_DIAG
 	  Suppress further scans after the initial discovery.
 	  Remove all discovered devices before the timed return.
 
+config SCSI_UFS_MALIBU_PARTITION_READ_DIAG
+	bool "Compare one block from the Grizzly boot_b partition"
+	depends on SCSI_UFS_MALIBU_GPT_SCAN_DIAG
+	help
+	  Select the non-NV boot_b partition using the validated GPT.
+	  Compare a single 4 KiB partition read with direct UFS I/O.
+	  Require all devices to remain read-only and reject every
+	  other request. Remove the disk without mounting storage.
+
+config SCSI_UFS_MALIBU_BLOCK_READ_DIAG
+	def_bool SCSI_UFS_MALIBU_RO_DISK_READ_DIAG || SCSI_UFS_MALIBU_PARTITION_READ_DIAG
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM
