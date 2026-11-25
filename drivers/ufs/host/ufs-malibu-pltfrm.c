@@ -23,6 +23,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 
 #include <ufs/ufshcd.h>
 #include "ufs-malibu.h"
@@ -575,6 +576,7 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	void __iomem *hci;
 	const char *phase;
 	bool phy_timed_out = false, phy_reset_released = false;
+	const bool guarded = IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_PREP_RELEASE);
 	u32 status;
 	int irq, ret, core_ret, prep_ret;
 
@@ -701,6 +703,12 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	ret = prep_ret;
 	if (ret < 0)
 		goto log_prep_failure;
+	if (guarded) {
+		phase = "prep-qualification";
+		ret = malibu_cpm_ufs_check_idle_stage(cpm, true);
+		if (ret)
+			goto log_prep_failure;
+	}
 	/* Sample before TOP programming so the reads do not delay its core vote. */
 	malibu_cpm_ufs_log_rails(cpm, "before-core");
 	phase = "phy-prepare";
@@ -725,7 +733,7 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 		phy_reset_released = ufs_malibu_log_phy_reset_ack(dev, &vote_regs);
 	/* Keep the readiness poll ahead of the post-core mailbox reads. */
 	malibu_cpm_ufs_log_rails(cpm, core_ret < 0 ? "after-core-error" : "after-core-poll");
-	if (phy_timed_out && phy_reset_released) {
+	if (!guarded && phy_timed_out && phy_reset_released) {
 		phase = "device-on-after-phy-timeout";
 		ret = ufs_malibu_check_device_on_after_timeout(ufs, cpm, &vote_regs.ap);
 		/* This fallback ends before HCI access, even when the PHY responds. */
@@ -764,6 +772,11 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 				 !(status & CONTROLLER_ENABLE), 10, 1000);
 	if (ret)
 		goto hold;
+	if (guarded) {
+		dev_info(dev, "ufs-uic-v43 link, HCI IRQ and Hibern8 verified; holding UFS votes until return\n");
+		goto put_cpm;
+	}
+
 	phase = "device-power-off";
 	ret = ufs_malibu_device_off(&ufs->device);
 	if (ret)
@@ -797,6 +810,17 @@ static int ufs_malibu_probe(struct platform_device *pdev)
 
 	if (!of_machine_is_compatible("google,malibu-grizzly"))
 		return -ENODEV;
+
+	if (IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_PREP_RELEASE)) {
+		struct device *cpm = ufs_malibu_get_cpm(dev);
+
+		if (IS_ERR(cpm))
+			return dev_err_probe(dev, PTR_ERR(cpm), "CPM provider unavailable\n");
+		ret = malibu_cpm_ufs_check_idle_stage(cpm, false);
+		put_device(cpm);
+		if (ret)
+			return dev_err_probe(dev, ret, "guarded prep release did not qualify\n");
+	}
 
 	group = devres_open_group(dev, NULL, GFP_KERNEL);
 	if (!group)
@@ -832,4 +856,26 @@ static struct platform_driver ufs_malibu_driver = {
 		.suppress_bind_attrs = true,
 	},
 };
+
+#if IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_PREP_RELEASE)
+static void ufs_malibu_register_guarded(struct work_struct *work)
+{
+	int ret = platform_driver_register(&ufs_malibu_driver);
+
+	if (ret)
+		pr_err("ufs-uic-v43: host registration failed: %d\n", ret);
+}
+
+static DECLARE_DELAYED_WORK(ufs_malibu_register_work, ufs_malibu_register_guarded);
+
+static int __init ufs_malibu_schedule_guarded(void)
+{
+	/* Give the late genpd work time to release prep before probe. */
+	if (of_machine_is_compatible("google,malibu-grizzly"))
+		schedule_delayed_work(&ufs_malibu_register_work, msecs_to_jiffies(2000));
+	return 0;
+}
+late_initcall_sync(ufs_malibu_schedule_guarded);
+#else
 builtin_platform_driver(ufs_malibu_driver);
+#endif

@@ -7,6 +7,7 @@
 #include <linux/completion.h>
 #include <linux/devm-helpers.h>
 #include <linux/errno.h>
+#include <linux/iopoll.h>
 #include <linux/jiffies.h>
 #include <linux/mailbox_client.h>
 #include <linux/malibu-cpm.h>
@@ -1036,7 +1037,36 @@ static int malibu_mbfs_lazy_on(struct malibu_cpm_domain *domain, const char **so
 static bool malibu_ufs_idle_diag(struct malibu_cpm *cpm)
 {
 	return IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_IDLE_DIAG) &&
-	       cpm->trace_ufs_psm;
+	       cpm->trace_ufs_psm &&
+	       (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU) ||
+		IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_PREP_RELEASE));
+}
+
+int malibu_cpm_ufs_check_idle_stage(struct device *supplier, bool prep_resumed)
+{
+	struct malibu_cpm *cpm;
+	int expected = prep_resumed ? MALIBU_UFS_IDLE_PREP_ON : MALIBU_UFS_IDLE_RELEASED;
+	int stage;
+
+	guard(device)(supplier);
+	if (supplier->driver != &malibu_cpm_driver.driver)
+		return -EPROBE_DEFER;
+	cpm = dev_get_drvdata(supplier);
+	if (!cpm)
+		return -EPROBE_DEFER;
+	if (!malibu_ufs_idle_diag(cpm))
+		return -ENODEV;
+	if (prep_resumed)
+		stage = READ_ONCE(cpm->ufs_idle_stage);
+	else
+		read_poll_timeout(READ_ONCE, stage, stage == expected, 1000, 200000,
+				  false, cpm->ufs_idle_stage);
+	dev_info(supplier, "ufs-uic-v43 host gate prep_resumed=%d stage=%d expected=%d\n",
+		 prep_resumed, stage, expected);
+	if (!prep_resumed && stage != expected)
+		return -EPROBE_DEFER;
+
+	return stage == expected ? 0 : -EAGAIN;
 }
 
 static bool malibu_ufs_idle_sample(struct malibu_cpm *cpm, const char *phase,
@@ -1280,7 +1310,8 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 	struct device *dev = cpm->dev;
 	struct malibu_cpm_domains *provider;
 	bool initial_ufs_votes = IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_VOTE_DIAG) &&
-				 cpm->trace_ufs_psm;
+				 cpm->trace_ufs_psm &&
+				 (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU) || malibu_ufs_idle_diag(cpm));
 	const bool prep_release = IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_PREP_RELEASE);
 	bool initially_on[MALIBU_MBFS_DOMAIN_COUNT];
 	unsigned int i;
@@ -1545,7 +1576,7 @@ static void malibu_cpm_observe_ufs(struct work_struct *work)
 	}
 
 	malibu_cpm_log_ufs_psms(cpm, "cpm-observe-2s");
-	if (malibu_ufs_idle_diag(cpm))
+	if (malibu_ufs_idle_diag(cpm) && !IS_ENABLED(CONFIG_SCSI_UFS_MALIBU))
 		malibu_cpm_idle_resume(cpm);
 	cpm->ufs_observe_late = true;
 	schedule_delayed_work(&cpm->ufs_observe_work, msecs_to_jiffies(18000));
@@ -1620,7 +1651,8 @@ static int malibu_cpm_probe(struct platform_device *pdev)
 	if (ret)
 		dev_warn(dev, "UFS regulator service unavailable: %pe\n", ERR_PTR(ret));
 	platform_set_drvdata(pdev, cpm);
-	if (cpm->trace_ufs_psm && !IS_ENABLED(CONFIG_SCSI_UFS_MALIBU)) {
+	if (cpm->trace_ufs_psm &&
+	    (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU) || malibu_ufs_idle_diag(cpm))) {
 		if (malibu_ufs_idle_diag(cpm)) {
 			INIT_DELAYED_WORK(&cpm->ufs_observe_work, malibu_cpm_observe_ufs);
 			ret = devm_add_action_or_reset(dev, malibu_cpm_stop_idle_diag, cpm);

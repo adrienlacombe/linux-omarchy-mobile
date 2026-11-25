@@ -119,12 +119,13 @@ config COMMON_CLK_GOOGLE_MALIBU_CPM
 
 config COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_VOTE_DIAG
 	bool "Grizzly UFS initial power vote diagnostic"
-	depends on COMMON_CLK_GOOGLE_MALIBU_CPM && !SCSI_UFS_MALIBU
+	depends on COMMON_CLK_GOOGLE_MALIBU_CPM
 	help
 	  On Grizzly, sample UFS power status while the provider checks
 	  and, if needed, raises the initial HSIO-S, UFS prep and UFS
 	  core votes. Hold the acknowledged domains on until reboot.
-	  This is for attended diagnostics with the UFS driver disabled.
+	  With the UFS host built, only the guarded prep-release diagnostic
+	  may use these initial votes.
 	  Leave disabled in normal kernels.
 
 config COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_IDLE_DIAG
@@ -133,7 +134,7 @@ config COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_IDLE_DIAG
 	help
 	  Hold HSIO-S and let genpd release an acquired UFS prep vote.
 	  Resume prep and request core ON only after guarded measurements
-	  show PSM1 moving from 3 to 2. The UFS host stays disabled.
+	  show PSM1 moving from 3 to 2.
 	  Leave disabled in normal kernels.
 
 config COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_GENPD_TRACE

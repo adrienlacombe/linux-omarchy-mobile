@@ -2,6 +2,8 @@
 #ifndef _LINUX_MALIBU_CPM_H
 #define _LINUX_MALIBU_CPM_H
 
+#include <linux/types.h>
+
 struct device;
 
 enum malibu_cpm_ufs_refclk_sample {
@@ -14,5 +16,6 @@ int malibu_cpm_ufs_decouple_enable(struct device *supplier);
 void malibu_cpm_ufs_log_rails(struct device *supplier, const char *phase);
 int malibu_cpm_ufs_refclk_sample(struct device *supplier, enum malibu_cpm_ufs_refclk_sample sample,
 				const char *phase);
+int malibu_cpm_ufs_check_idle_stage(struct device *supplier, bool prep_resumed);
 
 #endif /* _LINUX_MALIBU_CPM_H */
