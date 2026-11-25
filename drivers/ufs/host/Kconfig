@@ -155,15 +155,15 @@ config SCSI_UFS_MALIBU_REPORT_LUNS_DIAG
 	  without attaching disks or issuing a command to another LUN.
 	  Leave disabled outside Grizzly diagnostic builds.
 
-config SCSI_UFS_MALIBU_MIDLAYER_INQUIRY_DIAG
-	bool "Test one Grizzly SCSI midlayer INQUIRY"
+config SCSI_UFS_MALIBU_MIDLAYER_GPT_DIAG
+	bool "Read one Grizzly GPT block through the SCSI midlayer"
 	depends on SCSI_UFS_MALIBU_REPORT_LUNS_DIAG
 	help
-	  Read the 36-byte standard INQUIRY response from LUN 0 through
-	  the SCSI core pseudo-device in legacy mode. Remove the host
-	  without scanning or attaching disks. Restart the diagnostic
-	  if a timed-out DMA transfer cannot be stopped safely.
-	  Enable this only in Grizzly diagnostic builds.
+	  Read LBA 1 of LUN 0 through the SCSI core pseudo-device in
+	  legacy mode. Require 4 KiB blocks and compare the entire block
+	  against the earlier direct primary GPT header read in this boot.
+	  Keep discovery disabled and remove the host before link cleanup.
+	  Restart if a timed-out DMA transfer cannot be stopped safely.
 
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"

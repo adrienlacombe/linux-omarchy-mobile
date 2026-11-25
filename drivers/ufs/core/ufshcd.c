@@ -52,7 +52,8 @@ enum {
 
 enum { UFS_LINK_INQUIRY_LEN = 36 };
 
-static const u8 ufshcd_link_inquiry_cdb[6] = { INQUIRY, 0, 0, 0, UFS_LINK_INQUIRY_LEN, 0 };
+/* READ(10), LBA 1, one logical block. */
+static const u8 ufshcd_link_gpt_cdb[10] = { READ_10, 0, 0, 0, 0, 1, 0, 0, 1, 0 };
 
 #define CREATE_TRACE_POINTS
 #include "ufs_trace.h"
@@ -2445,9 +2446,9 @@ static inline void ufshcd_send_command(struct ufs_hba *hba,
 						  ufshcd_is_scsi_cmd(cmd));
 		__set_bit(tag, &hba->outstanding_reqs);
 		ufshcd_writel(hba, 1 << tag, REG_UTP_TRANSFER_REQ_DOOR_BELL);
-		if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_INQUIRY_DIAG) &&
+		if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_GPT_DIAG) &&
 		    READ_ONCE(hba->link_scsi_phase) == UFS_LINK_SCSI_SENT)
-			dev_info(hba->dev, "ufs-uic-v64 midlayer INQUIRY doorbell write tag=%d readback=%#x\n",
+			dev_info(hba->dev, "ufs-uic-v65 midlayer GPT doorbell write tag=%d readback=%#x\n",
 				 tag, ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL));
 		spin_unlock_irqrestore(&hba->outstanding_lock, flags);
 	}
@@ -3113,25 +3114,25 @@ static enum scsi_qc_status ufshcd_queuecommand(struct Scsi_Host *host,
 					       struct scsi_cmnd *cmd)
 {
 	struct ufs_hba *hba = shost_priv(host);
-	bool link_inquiry = IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_INQUIRY_DIAG) &&
+	bool link_gpt = IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_GPT_DIAG) &&
 			hba->link_query_only;
 	int tag = scsi_cmd_to_rq(cmd)->tag;
 	int err = 0;
 	struct ufs_hw_queue *hwq = NULL;
 
-	if (link_inquiry) {
+	if (link_gpt) {
 		bool pseudo = cmd->device == host->pseudo_sdev;
-		bool cdb_match = !memcmp(cmd->cmnd, ufshcd_link_inquiry_cdb,
-					 sizeof(ufshcd_link_inquiry_cdb));
+		bool cdb_match = !memcmp(cmd->cmnd, ufshcd_link_gpt_cdb,
+					 sizeof(ufshcd_link_gpt_cdb));
 		unsigned int bytes = scsi_bufflen(cmd);
 
-		if (!pseudo || bytes != UFS_LINK_INQUIRY_LEN ||
+		if (!pseudo || bytes != SZ_4K ||
 		    cmd->sc_data_direction != DMA_FROM_DEVICE || scsi_sg_count(cmd) != 1 ||
-		    cmd->cmd_len != sizeof(ufshcd_link_inquiry_cdb) ||
+		    cmd->cmd_len != sizeof(ufshcd_link_gpt_cdb) ||
 		    !cdb_match || cmpxchg(&hba->link_scsi_phase, UFS_LINK_SCSI_ARMED,
 					  UFS_LINK_SCSI_SENT) != UFS_LINK_SCSI_ARMED) {
 			dev_info(hba->dev,
-				 "ufs-uic-v64 midlayer INQUIRY gate reject tag=%d phase=%d pseudo=%u bytes=%u dir=%u sg=%u cmd_len=%u cdb_match=%u lun_in_cdb=%u\n",
+				 "ufs-uic-v65 midlayer GPT gate reject tag=%d phase=%d pseudo=%u bytes=%u dir=%u sg=%u cmd_len=%u cdb_match=%u lun_in_cdb=%u\n",
 				 tag, READ_ONCE(hba->link_scsi_phase), pseudo, bytes,
 				 cmd->sc_data_direction, scsi_sg_count(cmd),
 				 cmd->cmd_len, cdb_match, cmd->device->lun_in_cdb);
@@ -3139,7 +3140,7 @@ static enum scsi_qc_status ufshcd_queuecommand(struct Scsi_Host *host,
 			scsi_done(cmd);
 			return 0;
 		}
-		dev_info(hba->dev, "ufs-uic-v64 midlayer INQUIRY gate accepted tag=%d\n", tag);
+		dev_info(hba->dev, "ufs-uic-v65 midlayer GPT gate accepted tag=%d\n", tag);
 		goto send;
 	}
 	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG) && hba->link_query_only)
@@ -3194,22 +3195,22 @@ send:
 	ufshcd_hold(hba);
 
 	ufshcd_setup_scsi_cmd(hba, cmd,
-			      link_inquiry ? 0 : ufshcd_scsi_to_upiu_lun(cmd->device->lun), tag);
+			      link_gpt ? 0 : ufshcd_scsi_to_upiu_lun(cmd->device->lun), tag);
 
 	err = ufshcd_map_sg(hba, cmd);
-	if (link_inquiry) {
+	if (link_gpt) {
 		unsigned int bytes = err ? 0 : sg_dma_len(scsi_sglist(cmd));
 
-		if (!err && bytes != UFS_LINK_INQUIRY_LEN) {
+		if (!err && bytes != SZ_4K) {
 			scsi_dma_unmap(cmd);
 			err = -EIO;
 		}
-		dev_info(hba->dev, "ufs-uic-v64 midlayer INQUIRY map tag=%d ret=%d sg=%u direction=%u bytes=%u\n",
+		dev_info(hba->dev, "ufs-uic-v65 midlayer GPT map tag=%d ret=%d sg=%u direction=%u bytes=%u\n",
 			 tag, err, scsi_sg_count(cmd), cmd->sc_data_direction, bytes);
 	}
 	if (err) {
 		ufshcd_release(hba);
-		if (link_inquiry) {
+		if (link_gpt) {
 			set_host_byte(cmd, DID_TRANSPORT_FAILFAST);
 			scsi_done(cmd);
 			return 0;
@@ -5998,14 +5999,14 @@ void ufshcd_release_scsi_cmd(struct ufs_hba *hba, struct scsi_cmnd *cmd)
 	ufshcd_clk_scaling_update_busy(hba);
 }
 
-static void ufshcd_link_check_inquiry_response(struct ufs_hba *hba, struct scsi_cmnd *cmd,
-					       struct ufshcd_lrb *lrb, enum utp_ocs ocs)
+static void ufshcd_link_check_gpt_response(struct ufs_hba *hba, struct scsi_cmnd *cmd,
+					   struct ufshcd_lrb *lrb, enum utp_ocs ocs)
 {
 	const struct utp_upiu_header *rsp = &lrb->ucd_rsp_ptr->header;
 	int tag = scsi_cmd_to_rq(cmd)->tag;
 	u32 residual = be32_to_cpu(lrb->ucd_rsp_ptr->sr.residual_transfer_count);
 
-	dev_info(hba->dev, "ufs-uic-v64 midlayer INQUIRY IRQ tag=%d OCS=%#x type=%#x response=%#x status=%#x raw=%#x residual=%u\n",
+	dev_info(hba->dev, "ufs-uic-v65 midlayer GPT IRQ tag=%d OCS=%#x type=%#x response=%#x status=%#x raw=%#x residual=%u\n",
 		 tag, ocs, rsp->transaction_code, rsp->response, rsp->status, cmd->result,
 		 residual);
 	if (cmd->result || ocs != OCS_SUCCESS ||
@@ -6042,10 +6043,10 @@ void ufshcd_compl_one_cqe(struct ufs_hba *hba, int task_tag,
 			ufshcd_update_monitor(hba, cmd);
 		ufshcd_add_command_trace(hba, cmd, UFS_CMD_COMP);
 		cmd->result = ufshcd_transfer_rsp_status(hba, cmd, cqe);
-		if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_INQUIRY_DIAG) &&
+		if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_GPT_DIAG) &&
 		    READ_ONCE(hba->link_scsi_phase) == UFS_LINK_SCSI_SENT)
-			ufshcd_link_check_inquiry_response(hba, cmd, lrbp,
-							   ufshcd_get_tr_ocs(lrbp, cqe));
+			ufshcd_link_check_gpt_response(hba, cmd, lrbp,
+						       ufshcd_get_tr_ocs(lrbp, cqe));
 		ufshcd_release_scsi_cmd(hba, cmd);
 	} else {
 		if (cqe) {
@@ -9741,8 +9742,8 @@ out:
 		dev_err(hba->dev, "%s failed: %d\n", __func__, ret);
 }
 
-static enum scsi_timeout_action ufshcd_link_inquiry_timeout(struct ufs_hba *hba,
-							    struct scsi_cmnd *cmd)
+static enum scsi_timeout_action ufshcd_link_gpt_timeout(struct ufs_hba *hba,
+							struct scsi_cmnd *cmd)
 {
 	int tag = scsi_cmd_to_rq(cmd)->tag;
 	int ret = 0;
@@ -9758,7 +9759,7 @@ static enum scsi_timeout_action ufshcd_link_inquiry_timeout(struct ufs_hba *hba,
 	if (ret)
 		ufshcd_hba_stop(hba);
 
-	dev_err(hba->dev, "ufs-uic-v64 midlayer INQUIRY timeout tag=%d clear=%d hce=%#x\n",
+	dev_err(hba->dev, "ufs-uic-v65 midlayer GPT timeout tag=%d clear=%d hce=%#x\n",
 		tag, ret, ufshcd_readl(hba, REG_CONTROLLER_ENABLE));
 	if (ret && (ufshcd_readl(hba, REG_CONTROLLER_ENABLE) & CONTROLLER_ENABLE) &&
 	    (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL) & BIT(tag))) {
@@ -9766,7 +9767,7 @@ static enum scsi_timeout_action ufshcd_link_inquiry_timeout(struct ufs_hba *hba,
 		 * Keep the request and DMA mapping live. An orderly reboot may
 		 * wait for this probe, so bypass device shutdown.
 		 */
-		dev_emerg(hba->dev, "ufs-uic-v64 midlayer INQUIRY DMA still active; emergency restart\n");
+		dev_emerg(hba->dev, "ufs-uic-v65 midlayer GPT DMA still active; emergency restart\n");
 		emergency_restart();
 		return SCSI_EH_RESET_TIMER;
 	}
@@ -9782,8 +9783,8 @@ static enum scsi_timeout_action ufshcd_eh_timed_out(struct scsi_cmnd *scmd)
 {
 	struct ufs_hba *hba = shost_priv(scmd->device->host);
 
-	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_INQUIRY_DIAG) && hba->link_query_only)
-		return ufshcd_link_inquiry_timeout(hba, scmd);
+	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_GPT_DIAG) && hba->link_query_only)
+		return ufshcd_link_gpt_timeout(hba, scmd);
 
 	if (!hba->pm_op_in_progress) {
 		/* Activate the error handler in the SCSI core. */
@@ -11376,18 +11377,20 @@ static bool ufshcd_link_inquiry_valid(const u8 *data)
 	       data[4] >= UFS_LINK_INQUIRY_LEN - 5;
 }
 
-static int ufshcd_link_midlayer_inquiry(struct ufs_hba *hba)
+static int ufshcd_link_validate_gpt_header(u8 *data);
+
+static int ufshcd_link_midlayer_gpt(struct ufs_hba *hba, const u8 *reference)
 {
 	struct Scsi_Host *host = hba->host;
 	int residual = -1;
 	const struct scsi_exec_args args = { .resid = &residual };
 	int result;
-	u8 *data __free(kfree) = kzalloc(UFS_LINK_INQUIRY_LEN, GFP_KERNEL);
+	u8 *data __free(kfree_sensitive) = kzalloc(SZ_4K, GFP_KERNEL);
 
 	if (!data)
 		return -ENOMEM;
 
-	if (!host->pseudo_sdev ||
+	if (!reference || !host->pseudo_sdev ||
 	    ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL) ||
 	    ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) ||
 	    !(ufshcd_readl(hba, REG_CONTROLLER_STATUS) & UTP_TRANSFER_REQ_LIST_READY))
@@ -11403,15 +11406,15 @@ static int ufshcd_link_midlayer_inquiry(struct ufs_hba *hba)
 
 	/* The test addresses LUN 0 in the UPIU, not the pseudo-device's LUN. */
 	host->pseudo_sdev->lun_in_cdb = 0;
-	dev_info(hba->dev, "ufs-uic-v64 midlayer INQUIRY pseudo-device lun_in_cdb=%u\n",
+	dev_info(hba->dev, "ufs-uic-v65 midlayer GPT pseudo-device lun_in_cdb=%u\n",
 		 host->pseudo_sdev->lun_in_cdb);
 
 	WRITE_ONCE(hba->link_scsi_phase, UFS_LINK_SCSI_ARMED);
 	ufshcd_enable_intr(hba, UTP_TRANSFER_REQ_COMPL);
 	scsi_unblock_requests(host);
-	result = scsi_execute_cmd(host->pseudo_sdev, ufshcd_link_inquiry_cdb,
-				  REQ_OP_DRV_IN, data, UFS_LINK_INQUIRY_LEN, HZ, 0, &args);
-	dev_info(hba->dev, "ufs-uic-v64 midlayer INQUIRY returned phase=%d raw=%#x residual=%d\n",
+	result = scsi_execute_cmd(host->pseudo_sdev, ufshcd_link_gpt_cdb,
+				  REQ_OP_DRV_IN, data, SZ_4K, HZ, 0, &args);
+	dev_info(hba->dev, "ufs-uic-v65 midlayer GPT returned phase=%d raw=%#x residual=%d\n",
 		 READ_ONCE(hba->link_scsi_phase), result, residual);
 	scsi_block_requests(host);
 	ufshcd_disable_intr(hba, UTP_TRANSFER_REQ_COMPL);
@@ -11421,19 +11424,20 @@ static int ufshcd_link_midlayer_inquiry(struct ufs_hba *hba)
 	ufshcd_writel(hba, 0, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
 	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) && !result)
 		result = -EIO;
-	if (!result && !residual) {
-		dev_info(hba->dev, "ufs-uic-v64 midlayer INQUIRY qualifier=%u type=%#x version=%#x format=%#x additional=%u\n",
-			 data[0] >> 5, data[0] & 0x1f, data[2], data[3] & 0xf, data[4]);
-		if (!ufshcd_link_inquiry_valid(data))
-			result = -EPROTO;
-	} else if (!result) {
+	if (!result && residual)
 		result = -EIO;
+	if (!result) {
+		result = ufshcd_link_validate_gpt_header(data);
+		if (!result && memcmp(data, reference, SZ_4K))
+			result = -EBADMSG;
+		dev_info(hba->dev, "ufs-uic-v65 midlayer GPT comparison bytes=%u ret=%d\n",
+			 SZ_4K, result);
 	}
-	dev_info(hba->dev, "ufs-uic-v64 midlayer INQUIRY ret=%d\n", result);
+	dev_info(hba->dev, "ufs-uic-v65 midlayer GPT ret=%d\n", result);
 	return result > 0 ? -EIO : result;
 }
 
-static int ufshcd_link_probe_scsi_host(struct ufs_hba *hba)
+static int ufshcd_link_probe_scsi_host(struct ufs_hba *hba, const u8 *reference)
 {
 	struct Scsi_Host *host = hba->host;
 	struct scsi_device *sdev;
@@ -11456,8 +11460,8 @@ static int ufshcd_link_probe_scsi_host(struct ufs_hba *hba)
 				devices++;
 
 		dev_info(hba->dev, "ufs-uic-v59 SCSI host registered devices=%u\n", devices);
-		if (!devices && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_INQUIRY_DIAG))
-			ret = ufshcd_link_midlayer_inquiry(hba);
+		if (!devices && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_GPT_DIAG))
+			ret = ufshcd_link_midlayer_gpt(hba, reference);
 		ufshcd_remove_scsi_host(hba);
 		ufshcd_free_tmf_queue(hba);
 		dev_info(hba->dev, "ufs-uic-v59 SCSI host removed state=%u\n",
@@ -11958,7 +11962,7 @@ static int ufshcd_link_read_lba0(struct ufs_hba *hba, u32 logical_block_size)
 
 static int ufshcd_link_validate_gpt_header(u8 *data)
 {
-	u32 size, expected_crc;
+	u32 size, expected_crc, crc;
 
 	/* GPT revision 1.0 header prefix, as used by the EFI partition parser. */
 	if (memcmp(data, "EFI PART", 8) || get_unaligned_le32(data + 8) != 0x10000 ||
@@ -11970,10 +11974,10 @@ static int ufshcd_link_validate_gpt_header(u8 *data)
 
 	expected_crc = get_unaligned_le32(data + 16);
 	put_unaligned_le32(0, data + 16);
-	if (~crc32_le(~0U, data, size) != expected_crc)
-		return -EBADMSG;
+	crc = ~crc32_le(~0U, data, size);
+	put_unaligned_le32(expected_crc, data + 16);
 
-	return 0;
+	return crc == expected_crc ? 0 : -EBADMSG;
 }
 
 static int ufshcd_link_read_gpt_entries(struct ufs_hba *hba, const u8 *header, u32 last_lba)
@@ -12008,7 +12012,7 @@ static int ufshcd_link_read_gpt_entries(struct ufs_hba *hba, const u8 *header, u
 	return ret;
 }
 
-static int ufshcd_link_read_gpt_header(struct ufs_hba *hba, u32 last_lba)
+static int ufshcd_link_read_gpt_header(struct ufs_hba *hba, u32 last_lba, u8 *reference)
 {
 	struct ufs_link_payload payload = {};
 	int ret;
@@ -12022,6 +12026,8 @@ static int ufshcd_link_read_gpt_header(struct ufs_hba *hba, u32 last_lba)
 		ret = ufshcd_link_read_gpt_entries(hba, payload.data, last_lba);
 		dev_info(hba->dev, "ufs-uic-v58 READ(10) LUN 0 LBA 2 GPT entries result=%d\n", ret);
 	}
+	if (!ret && reference)
+		memcpy(reference, payload.data, SZ_4K);
 	if (payload.data)
 		memzero_explicit(payload.data, SZ_4K);
 	return ret;
@@ -12071,7 +12077,7 @@ static int ufshcd_link_report_luns(struct ufs_hba *hba)
 	return ret;
 }
 
-static int ufshcd_link_query_refclk(struct ufs_hba *hba)
+static int ufshcd_link_query_refclk(struct ufs_hba *hba, u8 *reference)
 {
 	u32 status, value = 0, logical_block_size = 0, last_lba = 0;
 	int ret;
@@ -12119,12 +12125,17 @@ static int ufshcd_link_query_refclk(struct ufs_hba *hba)
 		ret = ufshcd_link_read_capacity(hba, &logical_block_size, &last_lba);
 		dev_info(hba->dev, "ufs-uic-v53 READ CAPACITY(10) result=%d\n", ret);
 	}
+	if (!ret && reference && logical_block_size != SZ_4K) {
+		dev_err(hba->dev, "ufs-uic-v65 midlayer GPT unexpected block size=%u\n",
+			logical_block_size);
+		ret = -EPROTO;
+	}
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_LBA0_DIAG)) {
 		ret = ufshcd_link_read_lba0(hba, logical_block_size);
 		dev_info(hba->dev, "ufs-uic-v56 READ(10) result=%d\n", ret);
 	}
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_HEADER_DIAG))
-		ret = ufshcd_link_read_gpt_header(hba, last_lba);
+		ret = ufshcd_link_read_gpt_header(hba, last_lba, reference);
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_REPORT_LUNS_DIAG)) {
 		ret = ufshcd_link_report_luns(hba);
 		dev_info(hba->dev, "ufs-uic-v60 REPORT LUNS result=%d\n", ret);
@@ -12133,6 +12144,26 @@ static int ufshcd_link_query_refclk(struct ufs_hba *hba)
 	ufshcd_writel(hba, 0, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
 	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) && !ret)
 		ret = -EIO;
+	return ret;
+}
+
+static int ufshcd_link_run_diagnostics(struct ufs_hba *hba)
+{
+	u8 *reference __free(kfree_sensitive) = NULL;
+	int ret;
+
+	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_MIDLAYER_GPT_DIAG)) {
+		reference = kmalloc(SZ_4K, GFP_KERNEL);
+		if (!reference)
+			return -ENOMEM;
+	}
+
+	ret = ufshcd_link_query_refclk(hba, reference);
+	dev_info(hba->dev, "ufs-uic-v48 device query result=%d\n", ret);
+	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG)) {
+		ret = ufshcd_link_probe_scsi_host(hba, reference);
+		dev_info(hba->dev, "ufs-uic-v59 SCSI host lifecycle ret=%d\n", ret);
+	}
 	return ret;
 }
 
@@ -12334,15 +12365,8 @@ static int ufshcd_init_common(struct ufs_hba *hba, void __iomem *mmio_base, unsi
 		err = ufshcd_link_startup(hba, false);
 		if (report) {
 			dev_info(dev, "UIC link test result %d\n", err);
-			if (!err && hba->link_query_only) {
-				err = ufshcd_link_query_refclk(hba);
-				dev_info(dev, "ufs-uic-v48 device query result=%d\n", err);
-			}
-			if (!err && hba->link_query_only &&
-			    IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG)) {
-				err = ufshcd_link_probe_scsi_host(hba);
-				dev_info(dev, "ufs-uic-v59 SCSI host lifecycle ret=%d\n", err);
-			}
+			if (!err && hba->link_query_only)
+				err = ufshcd_link_run_diagnostics(hba);
 			if (!err)
 				hibern8_err = ufshcd_probe_hibern8(hba);
 		}
