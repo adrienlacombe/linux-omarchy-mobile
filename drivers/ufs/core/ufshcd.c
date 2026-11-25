@@ -329,7 +329,7 @@ static void ufshcd_async_scan(void *data, async_cookie_t cookie);
 static int ufshcd_reset_and_restore(struct ufs_hba *hba);
 static int ufshcd_eh_host_reset_handler(struct scsi_cmnd *cmd);
 static int ufshcd_clear_tm_cmd(struct ufs_hba *hba, int tag);
-static void ufshcd_hba_exit(struct ufs_hba *hba);
+static void ufshcd_hba_exit(struct ufs_hba *hba, bool link_only);
 static int ufshcd_device_init(struct ufs_hba *hba, bool init_dev_params);
 static int ufshcd_probe_hba(struct ufs_hba *hba, bool init_dev_params);
 static int ufshcd_setup_clocks(struct ufs_hba *hba, bool on);
@@ -10097,7 +10097,7 @@ out:
 	return err;
 }
 
-static void ufshcd_hba_exit(struct ufs_hba *hba)
+static void ufshcd_hba_exit(struct ufs_hba *hba, bool link_only)
 {
 	if (hba->is_powered) {
 		ufshcd_pm_qos_exit(hba);
@@ -10105,7 +10105,8 @@ static void ufshcd_hba_exit(struct ufs_hba *hba)
 		ufshcd_exit_clk_gating(hba);
 		if (hba->eh_wq)
 			destroy_workqueue(hba->eh_wq);
-		ufs_debugfs_hba_exit(hba);
+		if (!link_only)
+			ufs_debugfs_hba_exit(hba);
 		ufshcd_vops_exit(hba);
 		ufshcd_setup_vreg(hba, false);
 		ufshcd_setup_clocks(hba, false);
@@ -11007,7 +11008,7 @@ void ufshcd_remove(struct ufs_hba *hba)
 	ufshcd_disable_intr(hba, hba->intr_mask);
 	ufshcd_hba_stop(hba);
 	ufshcd_release_mcq_esi(hba);
-	ufshcd_hba_exit(hba);
+	ufshcd_hba_exit(hba, false);
 }
 EXPORT_SYMBOL_GPL(ufshcd_remove);
 
@@ -11573,7 +11574,7 @@ out_error:
 	if (abort_init)
 		ufshcd_abort_init(hba);
 	if (exit_hba)
-		ufshcd_hba_exit(hba);
+		ufshcd_hba_exit(hba, link_only);
 	return err > 0 ? -EIO : err;
 }
 

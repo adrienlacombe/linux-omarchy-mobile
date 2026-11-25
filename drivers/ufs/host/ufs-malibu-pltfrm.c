@@ -10,6 +10,7 @@
 #include <linux/iommu.h>
 #include <linux/iommu-dma.h>
 #include <linux/irq.h>
+#include <linux/ktime.h>
 #include <linux/malibu-cpm.h>
 #include <linux/malibu-ufs-psm.h>
 #include <linux/mm.h>
@@ -532,7 +533,8 @@ static int ufs_malibu_check_device_on_after_timeout(struct ufs_malibu *ufs,
 static void ufs_malibu_before_hci_stop(struct ufs_hba *hba, int link, int hibern8)
 {
 	struct ufs_malibu *ufs = ufshcd_get_variant(hba);
-	struct malibu_ufs_psm_status status;
+	struct malibu_ufs_psm_status status, initial;
+	u64 start_ns, elapsed_us;
 	bool off;
 	int ret;
 
@@ -541,9 +543,14 @@ static void ufs_malibu_before_hci_stop(struct ufs_hba *hba, int link, int hibern
 	if (link || hibern8)
 		return;
 
+	ufs_malibu_read_psms(ufs, &initial);
+	start_ns = ktime_get_ns();
 	ret = read_poll_timeout(ufs_malibu_psms_off, off, off, 5, 10000, false,
 				ufs, &status);
+	elapsed_us = div_u64(ktime_get_ns() - start_ns, NSEC_PER_USEC);
 	ufs->deep_h8_release_result = ret;
+	dev_info(hba->dev, "ufs-uic-v44 Deep H8 poll initial HC=%#x PHY=%#x elapsed_us=%llu\n",
+		 initial.hci, initial.phy, elapsed_us);
 	dev_info(hba->dev, "ufs-uic-v36 Deep H8 gate: HC=%#x PHY=%#x ret=%d\n",
 		 status.hci, status.phy, ret);
 	if (ret)
@@ -763,6 +770,13 @@ static int ufs_malibu_run_probe(struct platform_device *pdev, bool *retain)
 	ret = ufshcd_probe_link_hibern8(hba, hci, irq, ufs_malibu_before_hci_stop);
 	if (ret)
 		goto hold;
+	if (guarded) {
+		struct malibu_ufs_psm_status stopped;
+
+		ufs_malibu_read_psms(ufs, &stopped);
+		dev_info(dev, "ufs-uic-v44 PSM after HCI cleanup HC=%#x PHY=%#x\n",
+			 stopped.hci, stopped.phy);
+	}
 	phase = "deep-h8-qualification";
 	ret = ufs->deep_h8_release_result;
 	if (ret)
