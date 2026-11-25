@@ -109,6 +109,15 @@ config SCSI_UFS_MALIBU_CAPACITY_DIAG
 	  Do not scan for disks or read any logical blocks.
 	  Leave disabled outside Grizzly diagnostic builds.
 
+config SCSI_UFS_MALIBU_LBA0_DIAG
+	bool "Test one Grizzly LUN 0 block read before discovery"
+	depends on SCSI_UFS_MALIBU_CAPACITY_DIAG
+	help
+	  If READ CAPACITY reports 4096-byte blocks, read exactly one
+	  block at LBA 0 of LUN 0. Log DMA and MBR signature checks without
+	  exposing the block contents or scanning for partitions.
+	  Leave disabled outside Grizzly diagnostic builds.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM

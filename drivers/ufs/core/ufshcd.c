@@ -11535,6 +11535,12 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 **payload, b
 		name = "READ CAPACITY(10)";
 		len = UFS_LINK_CAPACITY_LEN;
 		break;
+	case READ_10:
+		if (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_LBA0_DIAG) || !irq)
+			return -EOPNOTSUPP;
+		name = "READ(10)";
+		len = SZ_4K;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -11557,6 +11563,8 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 **payload, b
 	req->sc.cdb[0] = opcode;
 	if (opcode == INQUIRY)
 		req->sc.cdb[4] = len;
+	else if (opcode == READ_10)
+		req->sc.cdb[8] = 1;
 
 	*prd = (struct ufshcd_sg_entry) {
 		.addr = cpu_to_le64(data_dma),
@@ -11619,7 +11627,7 @@ static int ufshcd_link_inquiry(struct ufs_hba *hba)
 	return 0;
 }
 
-static int ufshcd_link_read_capacity(struct ufs_hba *hba)
+static int ufshcd_link_read_capacity(struct ufs_hba *hba, u32 *logical_block_size)
 {
 	u32 last_lba, block_size;
 	bool retry = false;
@@ -11645,12 +11653,34 @@ static int ufshcd_link_read_capacity(struct ufs_hba *hba)
 
 	dev_info(hba->dev, "ufs-uic-v53 READ CAPACITY(10) capacity_bytes=%llu\n",
 		 (last_lba + 1ULL) * block_size);
+	*logical_block_size = block_size;
 	return 0;
+}
+
+static int ufshcd_link_read_lba0(struct ufs_hba *hba, u32 logical_block_size)
+{
+	bool dma_changed, mbr_signature;
+	u8 *data;
+	int ret;
+
+	if (logical_block_size != SZ_4K)
+		return -EPROTO;
+
+	ret = ufshcd_link_scsi_read(hba, READ_10, &data, NULL);
+	if (ret)
+		return ret;
+
+	dma_changed = memchr_inv(data, 0xff, SZ_4K);
+	mbr_signature = data[510] == 0x55 && data[511] == 0xaa;
+	memzero_explicit(data, SZ_4K);
+	dev_info(hba->dev, "ufs-uic-v56 READ(10) LUN 0 LBA 0 bytes=%u dma_changed=%u mbr_signature=%u\n",
+		 logical_block_size, dma_changed, mbr_signature);
+	return dma_changed ? 0 : -ENODATA;
 }
 
 static int ufshcd_link_query_refclk(struct ufs_hba *hba)
 {
-	u32 status, value = 0;
+	u32 status, value = 0, logical_block_size = 0;
 	int ret;
 
 	if (!hba->lsdb_sup || hba->mcq_enabled ||
@@ -11693,8 +11723,12 @@ static int ufshcd_link_query_refclk(struct ufs_hba *hba)
 		dev_info(hba->dev, "ufs-uic-v50 INQUIRY result=%d\n", ret);
 	}
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_CAPACITY_DIAG)) {
-		ret = ufshcd_link_read_capacity(hba);
+		ret = ufshcd_link_read_capacity(hba, &logical_block_size);
 		dev_info(hba->dev, "ufs-uic-v53 READ CAPACITY(10) result=%d\n", ret);
+	}
+	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_LBA0_DIAG)) {
+		ret = ufshcd_link_read_lba0(hba, logical_block_size);
+		dev_info(hba->dev, "ufs-uic-v56 READ(10) result=%d\n", ret);
 	}
 
 	ufshcd_writel(hba, 0, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
