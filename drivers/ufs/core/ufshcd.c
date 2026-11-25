@@ -3101,6 +3101,9 @@ static enum scsi_qc_status ufshcd_queuecommand(struct Scsi_Host *host,
 	int err = 0;
 	struct ufs_hw_queue *hwq = NULL;
 
+	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG) && hba->link_query_only)
+		return SCSI_MLQUEUE_HOST_BUSY;
+
 	switch (hba->ufshcd_state) {
 	case UFSHCD_STATE_OPERATIONAL:
 		break;
@@ -3182,6 +3185,9 @@ static enum scsi_qc_status ufshcd_queue_reserved_command(struct Scsi_Host *host,
 	struct ufs_hba *hba = shost_priv(host);
 	struct ufs_hw_queue *hwq =
 		hba->mcq_enabled ? ufshcd_mcq_req_to_hwq(hba, rq) : NULL;
+
+	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG) && hba->link_query_only)
+		return SCSI_MLQUEUE_HOST_BUSY;
 
 	ufshcd_add_query_upiu_trace(hba, UFS_QUERY_SEND, lrbp->ucd_req_ptr);
 	ufshcd_send_command(hba, cmd, hwq);
@@ -5591,6 +5597,10 @@ static int ufshcd_sdev_init(struct scsi_device *sdev)
 	struct ufs_hba *hba;
 
 	hba = shost_priv(sdev->host);
+
+	/* Host registration allocates a pseudo device for reserved commands. */
+	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG) && hba->link_query_only)
+		return sdev->lun == U64_MAX ? 0 : -ENODEV;
 
 	/* Mode sense(6) is not supported by UFS, so use Mode sense(10) */
 	sdev->use_10_for_ms = 1;
@@ -11241,6 +11251,40 @@ remove_scsi_host:
 	return err;
 }
 
+static int ufshcd_link_probe_scsi_host(struct ufs_hba *hba)
+{
+	struct Scsi_Host *host = hba->host;
+	struct scsi_device *sdev;
+	bool mcq_sup = hba->mcq_sup;
+	unsigned int devices = 0;
+	int ret;
+
+	if (hba->mcq_enabled || !hba->lsdb_sup || hba->scsi_host_added ||
+	    hba->ufshcd_state != UFSHCD_STATE_RESET)
+		return -EOPNOTSUPP;
+
+	/* Keep registration in legacy mode and leave dispatch blocked. */
+	hba->mcq_sup = false;
+	scsi_block_requests(host);
+	ret = ufshcd_add_scsi_host(hba);
+	dev_info(hba->dev, "ufs-uic-v59 SCSI host registration ret=%d\n", ret);
+	if (!ret) {
+		shost_for_each_device(sdev, host)
+			if (sdev != host->pseudo_sdev)
+				devices++;
+
+		dev_info(hba->dev, "ufs-uic-v59 SCSI host registered devices=%u\n", devices);
+		ufshcd_remove_scsi_host(hba);
+		ufshcd_free_tmf_queue(hba);
+		dev_info(hba->dev, "ufs-uic-v59 SCSI host removed state=%u\n",
+			 scsi_get_host_state(host));
+		if (devices || scsi_get_host_state(host) != SHOST_DEL)
+			ret = -EIO;
+	}
+	hba->mcq_sup = mcq_sup;
+	return ret;
+}
+
 static void ufshcd_abort_init(struct ufs_hba *hba, bool link_only)
 {
 	bool scan_pending = hba->scsi_host_added;
@@ -12025,6 +12069,11 @@ static int ufshcd_init_common(struct ufs_hba *hba, void __iomem *mmio_base, unsi
 			if (!err && hba->link_query_only) {
 				err = ufshcd_link_query_refclk(hba);
 				dev_info(dev, "ufs-uic-v48 device query result=%d\n", err);
+			}
+			if (!err && hba->link_query_only &&
+			    IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG)) {
+				err = ufshcd_link_probe_scsi_host(hba);
+				dev_info(dev, "ufs-uic-v59 SCSI host lifecycle ret=%d\n", err);
 			}
 			if (!err)
 				hibern8_err = ufshcd_probe_hibern8(hba);

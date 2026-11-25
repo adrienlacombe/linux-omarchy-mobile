@@ -137,6 +137,15 @@ config SCSI_UFS_MALIBU_GPT_ENTRIES_DIAG
 	  partition entries or scan for disks.
 	  Leave disabled outside Grizzly diagnostic builds.
 
+config SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG
+	bool "Test Grizzly SCSI host registration before discovery"
+	depends on SCSI_UFS_MALIBU_GPT_ENTRIES_DIAG
+	help
+	  After the guarded GPT reads finish, register the SCSI host in
+	  legacy mode with command dispatch blocked. Verify it has no
+	  discovered devices, then remove it before HCI cleanup.
+	  Leave disabled outside Grizzly diagnostic builds.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM
