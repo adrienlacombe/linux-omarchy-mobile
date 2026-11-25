@@ -1074,6 +1074,11 @@ enum ufshcd_mcq_opr {
  * @scsi_host_added: indicates that scsi_add_host() has been called
  * @link_query_only: use the dedicated transfer slot in a link test
  * @link_inquiry_done: armed completion for the link test INQUIRY IRQ
+ * @link_gpt_reads: GPT metadata requests consumed by the scan
+ * @link_gpt_last_lba: checked backup GPT header location
+ * @link_gpt_entry_blocks: checked size of a GPT entry array in blocks
+ * @link_gpt_partitions: used entries in the validated primary array
+ * @link_gpt_failed: whether any GPT scan request was refused or failed
  * @link_diag_read_bio: exact block request permitted by the GPT diagnostic
  * @link_diag_ro_blocks: live capacity in 4 KiB blocks for the disk diagnostic
  * @link_scsi_phase: one-command dispatch state for the SCSI midlayer test
@@ -1271,6 +1276,13 @@ struct ufs_hba {
 #endif
 #ifdef CONFIG_SCSI_UFS_MALIBU_RO_DISK_READ_DIAG
 	struct bio *link_diag_read_bio;
+#endif
+#ifdef CONFIG_SCSI_UFS_MALIBU_GPT_SCAN_DIAG
+	unsigned long link_gpt_reads;
+	u32 link_gpt_last_lba;
+	u8 link_gpt_entry_blocks;
+	u8 link_gpt_partitions;
+	bool link_gpt_failed;
 #endif
 	bool mcq_sup;
 	bool lsdb_sup;

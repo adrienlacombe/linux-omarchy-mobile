@@ -185,6 +185,16 @@ config SCSI_UFS_MALIBU_RO_DISK_READ_DIAG
 	  Reject all other disk requests, keep partition scans disabled
 	  and remove the disk and host before link and controller cleanup.
 
+config SCSI_UFS_MALIBU_GPT_SCAN_DIAG
+	bool "Discover Grizzly GPT partitions on the read-only disk"
+	depends on SCSI_UFS_MALIBU_RO_DISK_DIAG && !SCSI_UFS_MALIBU_RO_DISK_READ_DIAG
+	depends on EFI_PARTITION && !MSDOS_PARTITION && BLK_DEV_MD != y
+	help
+	  Allow the standard GPT parser to read only validated metadata
+	  ranges on LUN 0. Keep writes and partition data I/O blocked.
+	  Suppress further scans after the initial discovery.
+	  Remove all discovered devices before the timed return.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM

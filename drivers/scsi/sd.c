@@ -3786,7 +3786,8 @@ static void sd_revalidate_disk(struct gendisk *disk)
 		sdp->sector_size = queue_logical_block_size(disk->queue);
 		sdkp->capacity = sdp->malibu_diag_ro_blocks;
 		sdkp->write_prot = 1;
-		disk->flags |= GENHD_FL_NO_PART;
+		if (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_SCAN_DIAG))
+			disk->flags |= GENHD_FL_NO_PART;
 		set_bit(GD_READ_ONLY, &disk->state);
 		set_capacity(disk, logical_to_sectors(sdp, sdkp->capacity));
 		return;
