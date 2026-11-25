@@ -1075,7 +1075,8 @@ enum ufshcd_mcq_opr {
  * @link_query_only: use the dedicated transfer slot in a link test
  * @link_inquiry_done: armed completion for the link test INQUIRY IRQ
  * @link_gpt_reads: GPT metadata requests consumed by the scan
- * @link_gpt_last_lba: checked backup GPT header location
+ * @link_gpt_last_lba: capacity-checked backup GPT header location
+ * @link_gpt_backup_entries_lba: entry-array start from the checked backup header
  * @link_gpt_entry_blocks: checked size of a GPT entry array in blocks
  * @link_gpt_partitions: used entries in the validated primary array
  * @link_gpt_failed: whether any GPT scan request was refused or failed
@@ -1280,6 +1281,7 @@ struct ufs_hba {
 #ifdef CONFIG_SCSI_UFS_MALIBU_GPT_SCAN_DIAG
 	unsigned long link_gpt_reads;
 	u32 link_gpt_last_lba;
+	u32 link_gpt_backup_entries_lba;
 	u8 link_gpt_entry_blocks;
 	u8 link_gpt_partitions;
 	bool link_gpt_failed;

@@ -2462,7 +2462,7 @@ static inline void ufshcd_send_command(struct ufs_hba *hba,
 		ufshcd_writel(hba, 1 << tag, REG_UTP_TRANSFER_REQ_DOOR_BELL);
 		if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_SINGLE_LUN_DIAG) &&
 		    ufshcd_link_scsi_sent(hba))
-			dev_info(hba->dev, "ufs-uic-v69 LUN 0 SCSI doorbell write tag=%d readback=%#x\n",
+			dev_info(hba->dev, "ufs-uic-v70 LUN 0 SCSI doorbell write tag=%d readback=%#x\n",
 				 tag, ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL));
 		spin_unlock_irqrestore(&hba->outstanding_lock, flags);
 	}
@@ -3150,12 +3150,14 @@ static bool ufshcd_link_gpt_scan_request(struct ufs_hba *hba, struct scsi_cmnd *
 	struct request *rq = scsi_cmd_to_rq(cmd);
 	unsigned int blocks = hba->link_gpt_entry_blocks;
 	u32 last = hba->link_gpt_last_lba;
+	u32 backup = hba->link_gpt_backup_entries_lba;
 	sector_t sector = blk_rq_pos(rq);
 	sector_t lba = sector / (SZ_4K / SECTOR_SIZE);
 	u8 cdb[10] = { READ_10, 0, 0, 0, 0, 0, 0, 0, 1, 0 };
 	unsigned int index;
 
-	if (READ_ONCE(hba->link_gpt_failed) || !ufshcd_link_lun_target(hba, cmd->device) ||
+	if (!blocks || !backup || READ_ONCE(hba->link_gpt_failed) ||
+	    !ufshcd_link_lun_target(hba, cmd->device) ||
 	    cmd->device->sdev_state != SDEV_RUNNING || req_op(rq) != REQ_OP_READ ||
 	    !rq->q->disk || !get_disk_ro(rq->q->disk) ||
 	    !rq->bio || rq->bio != rq->biotail ||
@@ -3167,15 +3169,17 @@ static bool ufshcd_link_gpt_scan_request(struct ufs_hba *hba, struct scsi_cmnd *
 
 	if (lba <= 1 + blocks)
 		index = lba;
-	else if (lba >= last - blocks && lba <= last)
-		index = 2 + blocks + lba - (last - blocks);
+	else if (lba == last)
+		index = 2 + 2 * blocks;
+	else if (lba >= backup && lba < backup + blocks)
+		index = 2 + blocks + lba - backup;
 	else
 		return false;
 
 	put_unaligned_be32(lba, cdb + 2);
 	if (memcmp(cmd->cmnd, cdb, sizeof(cdb)) || test_and_set_bit(index, &hba->link_gpt_reads))
 		return false;
-	dev_info(hba->dev, "ufs-uic-v69 GPT scan admitted lba=%llu tag=%d\n",
+	dev_info(hba->dev, "ufs-uic-v70 GPT scan admitted lba=%llu tag=%d\n",
 		 (unsigned long long)lba, rq->tag);
 	return true;
 #else
@@ -3208,7 +3212,7 @@ static enum scsi_qc_status ufshcd_queuecommand(struct Scsi_Host *host,
 			goto send;
 		}
 		ufshcd_link_fail_gpt_scan(hba);
-		dev_err(hba->dev, "ufs-uic-v69 GPT scan rejected opcode=%#x sector=%llu bytes=%u\n",
+		dev_err(hba->dev, "ufs-uic-v70 GPT scan rejected opcode=%#x sector=%llu bytes=%u\n",
 			cmd->cmnd[0], (unsigned long long)blk_rq_pos(scsi_cmd_to_rq(cmd)),
 			scsi_bufflen(cmd));
 		set_host_byte(cmd, DID_TRANSPORT_FAILFAST);
@@ -3233,13 +3237,13 @@ static enum scsi_qc_status ufshcd_queuecommand(struct Scsi_Host *host,
 		    scsi_sg_count(cmd) != 1 || cmd->cmd_len != len || memcmp(cmd->cmnd, cdb, len) ||
 		    cmpxchg(&hba->link_scsi_phase, armed, sent) != armed) {
 			dev_info(hba->dev,
-				 "ufs-uic-v69 LUN 0 SCSI gate reject tag=%d phase=%d opcode=%#x bytes=%u\n",
+				 "ufs-uic-v70 LUN 0 SCSI gate reject tag=%d phase=%d opcode=%#x bytes=%u\n",
 				 tag, phase, cmd->cmnd[0], scsi_bufflen(cmd));
 			set_host_byte(cmd, DID_TRANSPORT_FAILFAST);
 			scsi_done(cmd);
 			return 0;
 		}
-		dev_info(hba->dev, "ufs-uic-v69 LUN 0 SCSI gate accepted tag=%d phase=%d opcode=%#x\n",
+		dev_info(hba->dev, "ufs-uic-v70 LUN 0 SCSI gate accepted tag=%d phase=%d opcode=%#x\n",
 			 tag, sent, cmd->cmnd[0]);
 		goto send;
 	}
@@ -3305,7 +3309,7 @@ send:
 			scsi_dma_unmap(cmd);
 			err = -EIO;
 		}
-		dev_info(hba->dev, "ufs-uic-v69 LUN 0 SCSI map tag=%d ret=%d sg=%u direction=%u bytes=%u\n",
+		dev_info(hba->dev, "ufs-uic-v70 LUN 0 SCSI map tag=%d ret=%d sg=%u direction=%u bytes=%u\n",
 			 tag, err, scsi_sg_count(cmd), cmd->sc_data_direction, bytes);
 	}
 	if (err) {
@@ -6133,7 +6137,7 @@ static void ufshcd_link_check_lun_response(struct ufs_hba *hba, struct scsi_cmnd
 	int tag = scsi_cmd_to_rq(cmd)->tag;
 	u32 residual = be32_to_cpu(lrb->ucd_rsp_ptr->sr.residual_transfer_count);
 
-	dev_info(hba->dev, "ufs-uic-v69 LUN 0 SCSI IRQ tag=%d opcode=%#x OCS=%#x type=%#x response=%#x status=%#x raw=%#x residual=%u\n",
+	dev_info(hba->dev, "ufs-uic-v70 LUN 0 SCSI IRQ tag=%d opcode=%#x OCS=%#x type=%#x response=%#x status=%#x raw=%#x residual=%u\n",
 		 tag, cmd->cmnd[0], ocs, rsp->transaction_code, rsp->response,
 		 rsp->status, cmd->result, residual);
 	if (cmd->result || ocs != OCS_SUCCESS ||
@@ -9892,7 +9896,7 @@ static enum scsi_timeout_action ufshcd_link_lun_timeout(struct ufs_hba *hba,
 	if (ret)
 		ufshcd_hba_stop(hba);
 
-	dev_err(hba->dev, "ufs-uic-v69 LUN 0 SCSI timeout tag=%d clear=%d hce=%#x\n",
+	dev_err(hba->dev, "ufs-uic-v70 LUN 0 SCSI timeout tag=%d clear=%d hce=%#x\n",
 		tag, ret, ufshcd_readl(hba, REG_CONTROLLER_ENABLE));
 	if (ret && (ufshcd_readl(hba, REG_CONTROLLER_ENABLE) & CONTROLLER_ENABLE) &&
 	    (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL) & BIT(tag))) {
@@ -9900,7 +9904,7 @@ static enum scsi_timeout_action ufshcd_link_lun_timeout(struct ufs_hba *hba,
 		 * Keep the request and DMA mapping live. An orderly reboot may
 		 * wait for this probe, so bypass device shutdown.
 		 */
-		dev_emerg(hba->dev, "ufs-uic-v69 LUN 0 SCSI DMA still active; emergency restart\n");
+		dev_emerg(hba->dev, "ufs-uic-v70 LUN 0 SCSI DMA still active; emergency restart\n");
 		emergency_restart();
 		return SCSI_EH_RESET_TIMER;
 	}
@@ -11610,7 +11614,7 @@ static int ufshcd_link_verify_gpt_scan(struct ufs_hba *hba, struct gendisk *disk
 	unsigned long index;
 
 	if (READ_ONCE(hba->link_gpt_failed) || hba->link_gpt_reads != GENMASK(reads - 1, 0)) {
-		dev_err(hba->dev, "ufs-uic-v69 GPT scan incomplete reads=%#lx expected=%u failed=%u\n",
+		dev_err(hba->dev, "ufs-uic-v70 GPT scan incomplete reads=%#lx expected=%u failed=%u\n",
 			hba->link_gpt_reads, reads, hba->link_gpt_failed);
 		return -EIO;
 	}
@@ -11621,11 +11625,11 @@ static int ufshcd_link_verify_gpt_scan(struct ufs_hba *hba, struct gendisk *disk
 		partitions++;
 	}
 	if (partitions != hba->link_gpt_partitions) {
-		dev_err(hba->dev, "ufs-uic-v69 GPT scan partition count=%u expected=%u\n",
+		dev_err(hba->dev, "ufs-uic-v70 GPT scan partition count=%u expected=%u\n",
 			partitions, hba->link_gpt_partitions);
 		return -EIO;
 	}
-	dev_info(hba->dev, "ufs-uic-v69 LUN 0 GPT scan verified partitions=%u metadata_reads=%u\n",
+	dev_info(hba->dev, "ufs-uic-v70 LUN 0 GPT scan verified partitions=%u metadata_reads=%u\n",
 		 partitions, reads);
 #endif
 	return 0;
@@ -11666,7 +11670,7 @@ static int ufshcd_link_observe_ro_disk(struct ufs_hba *hba, struct scsi_device *
 	    !!(disk->flags & GENHD_FL_NO_PART) != scan &&
 	    queue_logical_block_size(disk->queue) == SZ_4K &&
 	    get_capacity(disk) == sdev->malibu_diag_ro_blocks * (SZ_4K / SECTOR_SIZE)) {
-		dev_info(hba->dev, "ufs-uic-v69 LUN 0 disk read-only sectors=%llu block_size=%u initial_scan=%u\n",
+		dev_info(hba->dev, "ufs-uic-v70 LUN 0 disk read-only sectors=%llu block_size=%u initial_scan=%u\n",
 			 (unsigned long long)get_capacity(disk), SZ_4K, scan);
 		ret = scan ? ufshcd_link_verify_gpt_scan(hba, disk) :
 		      ufshcd_link_read_disk_gpt(hba, disk, reference);
@@ -11713,7 +11717,7 @@ static int ufshcd_link_scan_lun(struct ufs_hba *hba, const u8 *reference)
 	    sdev->inquiry_len != UFS_LINK_INQUIRY_LEN ||
 	    device_is_bound(&sdev->sdev_gendev))
 		ret = -EIO;
-	dev_info(hba->dev, "ufs-uic-v69 LUN 0 child visible=%u state=%u type=%u inquiry_len=%u no_uld=%u ret=%d\n",
+	dev_info(hba->dev, "ufs-uic-v70 LUN 0 child visible=%u state=%u type=%u inquiry_len=%u no_uld=%u ret=%d\n",
 		 sdev->is_visible, sdev->sdev_state, sdev->type, sdev->inquiry_len,
 		 sdev->no_uld_attach, ret);
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_RO_DISK_DIAG))
@@ -12036,10 +12040,11 @@ static bool ufshcd_link_log_sense(struct ufs_hba *hba, const char *name,
 	       hdr.sense_key == UNIT_ATTENTION && hdr.asc == 0x29 && hdr.ascq == 0;
 }
 
-static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 blocks,
+static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u32 lba, u8 blocks,
 				 struct ufs_link_payload *payload, bool *retry)
 {
 	bool irq = IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_INQUIRY_IRQ_DIAG);
+	bool backup_header = false;
 	struct utp_devman_cmd_desc *ucd = hba->devman_ucd_base_addr;
 	struct utp_transfer_req_desc *utrd = hba->utrdl_base_addr;
 	struct utp_upiu_req *req = (void *)ucd->command_upiu;
@@ -12052,6 +12057,9 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 bloc
 	u32 len, residual;
 	int ret;
 
+#ifdef CONFIG_SCSI_UFS_MALIBU_GPT_SCAN_DIAG
+	backup_header = lba > 2 && lba == hba->link_gpt_last_lba;
+#endif
 	switch (opcode) {
 	case INQUIRY:
 		name = "INQUIRY";
@@ -12070,7 +12078,7 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 bloc
 			if (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_ENTRIES_DIAG) ||
 			    !blocks || blocks > UFS_LINK_GPT_MAX_BLOCKS)
 				return -EOPNOTSUPP;
-		} else if (lba > 1 || blocks != 1 ||
+		} else if ((lba > 1 && !backup_header) || blocks != 1 ||
 			   (lba == 1 && !IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_HEADER_DIAG))) {
 			return -EOPNOTSUPP;
 		}
@@ -12108,7 +12116,7 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 bloc
 	if (opcode == INQUIRY)
 		req->sc.cdb[4] = len;
 	else if (opcode == READ_10) {
-		req->sc.cdb[5] = lba;
+		put_unaligned_be32(lba, &req->sc.cdb[2]);
 		req->sc.cdb[8] = blocks;
 	} else if (opcode == REPORT_LUNS) {
 		put_unaligned_be32(len, &req->sc.cdb[6]);
@@ -12246,13 +12254,13 @@ static int ufshcd_link_read_lba0(struct ufs_hba *hba, u32 logical_block_size)
 	return dma_changed ? 0 : -ENODATA;
 }
 
-static int ufshcd_link_validate_gpt_header(u8 *data)
+static int ufshcd_link_validate_gpt_header(u8 *data, u32 lba)
 {
 	u32 size, expected_crc, crc;
 
 	/* GPT revision 1.0 header prefix, as used by the EFI partition parser. */
 	if (memcmp(data, "EFI PART", 8) || get_unaligned_le32(data + 8) != 0x10000 ||
-	    get_unaligned_le32(data + 20) || get_unaligned_le64(data + 24) != 1)
+	    get_unaligned_le32(data + 20) || get_unaligned_le64(data + 24) != lba)
 		return -EPROTO;
 	size = get_unaligned_le32(data + 12);
 	if (size < 92 || size > SZ_4K)
@@ -12276,7 +12284,7 @@ static int ufshcd_link_validate_scan_layout(struct ufs_hba *hba, const u8 *heade
 	unsigned int partitions = 0;
 	u32 i;
 
-	/* Only canonical backup metadata, outside all usable blocks, is allowed. */
+	/* Check that a backup header and array can fit after the usable range. */
 	if (last_lba <= blocks + 1 || get_unaligned_le64(header + 32) != last_lba ||
 	    first > last || last >= last_lba - blocks)
 		return -EPROTO;
@@ -12297,8 +12305,54 @@ static int ufshcd_link_validate_scan_layout(struct ufs_hba *hba, const u8 *heade
 	hba->link_gpt_last_lba = last_lba;
 	hba->link_gpt_entry_blocks = blocks;
 	hba->link_gpt_partitions = partitions;
-	dev_info(hba->dev, "ufs-uic-v69 GPT scan layout entry_blocks=%u partitions=%u backup=%u\n",
+	dev_info(hba->dev, "ufs-uic-v70 GPT scan layout entry_blocks=%u partitions=%u backup=%u\n",
 		 blocks, partitions, last_lba);
+#endif
+	return 0;
+}
+
+#ifdef CONFIG_SCSI_UFS_MALIBU_GPT_SCAN_DIAG
+static int ufshcd_link_match_backup_gpt(u8 *backup, const u8 *primary, u32 last_lba,
+					u32 blocks, u32 *array_lba)
+{
+	u64 start = get_unaligned_le64(backup + 72);
+	int ret;
+
+	ret = ufshcd_link_validate_gpt_header(backup, last_lba);
+	if (ret)
+		return ret;
+
+	if (get_unaligned_le64(backup + 32) != 1 ||
+	    memcmp(backup + 40, primary + 40, 32) ||
+	    memcmp(backup + 80, primary + 80, 12) ||
+	    !blocks || blocks > UFS_LINK_GPT_MAX_BLOCKS || blocks >= last_lba ||
+	    start <= get_unaligned_le64(primary + 48) || start > last_lba - blocks)
+		return -EPROTO;
+
+	*array_lba = start;
+	return 0;
+}
+#endif
+
+static int ufshcd_link_read_backup_gpt(struct ufs_hba *hba, const u8 *primary, u32 last_lba,
+				       u32 blocks)
+{
+#ifdef CONFIG_SCSI_UFS_MALIBU_GPT_SCAN_DIAG
+	struct ufs_link_payload payload;
+	u32 array_lba;
+	int ret;
+
+	ret = ufshcd_link_scsi_read(hba, READ_10, last_lba, 1, &payload, NULL);
+	if (ret)
+		return ret;
+
+	ret = ufshcd_link_match_backup_gpt(payload.data, primary, last_lba, blocks, &array_lba);
+	memzero_explicit(payload.data, SZ_4K);
+	if (ret)
+		return ret;
+	hba->link_gpt_backup_entries_lba = array_lba;
+	dev_info(hba->dev, "ufs-uic-v70 backup GPT header verified lba=%u entries_lba=%u blocks=%u\n",
+		 last_lba, array_lba, blocks);
 #endif
 	return 0;
 }
@@ -12333,6 +12387,10 @@ static int ufshcd_link_read_gpt_entries(struct ufs_hba *hba, const u8 *header, u
 	ret = ~crc32_le(~0U, data, bytes) == expected_crc ? 0 : -EBADMSG;
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_SCAN_DIAG))
 		ret = ufshcd_link_validate_scan_layout(hba, header, data, count, blocks, last_lba);
+	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_SCAN_DIAG)) {
+		ret = ufshcd_link_read_backup_gpt(hba, header, last_lba, blocks);
+		dev_info(hba->dev, "ufs-uic-v70 backup GPT header result=%d\n", ret);
+	}
 	memzero_explicit(data, blocks * SZ_4K);
 	return ret;
 }
@@ -12344,7 +12402,7 @@ static int ufshcd_link_read_gpt_header(struct ufs_hba *hba, u32 last_lba, u8 *re
 
 	ret = ufshcd_link_scsi_read(hba, READ_10, 1, 1, &payload, NULL);
 	if (!ret)
-		ret = ufshcd_link_validate_gpt_header(payload.data);
+		ret = ufshcd_link_validate_gpt_header(payload.data, 1);
 	dev_info(hba->dev, "ufs-uic-v57 READ(10) LUN 0 LBA 1 GPT header result=%d\n", ret);
 
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_ENTRIES_DIAG)) {
