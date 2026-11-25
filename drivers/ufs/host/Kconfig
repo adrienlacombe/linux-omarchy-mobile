@@ -158,12 +158,23 @@ config SCSI_UFS_MALIBU_REPORT_LUNS_DIAG
 config SCSI_UFS_MALIBU_SINGLE_LUN_DIAG
 	bool "Probe one Grizzly SCSI child without binding a disk driver"
 	depends on SCSI_UFS_MALIBU_REPORT_LUNS_DIAG
-	depends on BLK_DEV_SD = n && CHR_DEV_SG = n && BLK_DEV_BSG = n
+	depends on CHR_DEV_SG = n && BLK_DEV_BSG = n
 	help
 	  Probe only channel 0, target 0, LUN 0 with one standard INQUIRY.
 	  Reject every other SCSI request and omit normal LU configuration.
 	  Briefly register the child with upper-level driver matching off.
 	  Remove the child and host before link and controller cleanup.
+
+config SCSI_UFS_MALIBU_RO_DISK_DIAG
+	bool "Publish a temporary read-only Grizzly disk"
+	depends on SCSI_UFS_MALIBU_SINGLE_LUN_DIAG && BLK_DEV_SD = y
+	depends on SCSI_UFS_BSG = n && RPMB = n
+	help
+	  Attach sd to the one qualified LUN using the live geometry.
+	  Set read-only and disable partition discovery before publication.
+	  Keep the block device visible briefly for a RAM sysfs check.
+	  Reject all SCSI requests after the original discovery INQUIRY.
+	  Remove the disk and host before link and controller cleanup.
 
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"

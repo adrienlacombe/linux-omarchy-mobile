@@ -102,6 +102,10 @@ struct scsi_vpd {
 };
 
 struct scsi_device {
+#ifdef CONFIG_SCSI_UFS_MALIBU_RO_DISK_DIAG
+	/* Live capacity in 4 KiB blocks for the Grizzly diagnostic disk. */
+	u64 malibu_diag_ro_blocks;
+#endif
 	struct Scsi_Host *host;
 	struct request_queue *request_queue;
 

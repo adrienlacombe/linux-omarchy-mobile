@@ -3780,6 +3780,19 @@ static void sd_revalidate_disk(struct gendisk *disk)
 	unsigned int dev_max;
 	int err;
 
+#ifdef CONFIG_SCSI_UFS_MALIBU_RO_DISK_DIAG
+	if (sdp->malibu_diag_ro_blocks) {
+		/* The transport qualified geometry and blocks all further commands. */
+		sdp->sector_size = queue_logical_block_size(disk->queue);
+		sdkp->capacity = sdp->malibu_diag_ro_blocks;
+		sdkp->write_prot = 1;
+		disk->flags |= GENHD_FL_NO_PART;
+		set_bit(GD_READ_ONLY, &disk->state);
+		set_capacity(disk, logical_to_sectors(sdp, sdkp->capacity));
+		return;
+	}
+#endif
+
 	SCSI_LOG_HLQUEUE(3, sd_printk(KERN_INFO, sdkp,
 				      "sd_revalidate_disk\n"));
 
