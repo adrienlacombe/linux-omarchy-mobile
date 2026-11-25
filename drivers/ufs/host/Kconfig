@@ -128,6 +128,15 @@ config SCSI_UFS_MALIBU_GPT_HEADER_DIAG
 	  the header contents. Do not scan or read the entry array.
 	  Leave disabled outside Grizzly diagnostic builds.
 
+config SCSI_UFS_MALIBU_GPT_ENTRIES_DIAG
+	bool "Test the Grizzly primary GPT entry array before discovery"
+	depends on SCSI_UFS_MALIBU_GPT_HEADER_DIAG
+	help
+	  After validating the primary header, read at most four blocks
+	  from LBA 2 and check the GPT entry-array CRC. Do not parse or log
+	  partition entries or scan for disks.
+	  Leave disabled outside Grizzly diagnostic builds.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM

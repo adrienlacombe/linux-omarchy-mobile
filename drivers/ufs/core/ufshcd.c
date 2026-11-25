@@ -11483,6 +11483,7 @@ static int ufshcd_link_submit_slot_irq(struct ufs_hba *hba, const char *name)
 enum {
 	UFS_LINK_INQUIRY_LEN = 36,
 	UFS_LINK_CAPACITY_LEN = 8,
+	UFS_LINK_GPT_MAX_BLOCKS = 4,
 };
 
 /* Return true for the current reset UNIT ATTENTION observed on D1. */
@@ -11511,7 +11512,8 @@ static bool ufshcd_link_log_sense(struct ufs_hba *hba, const char *name,
 	       hdr.sense_key == UNIT_ATTENTION && hdr.asc == 0x29 && hdr.ascq == 0;
 }
 
-static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 **payload, bool *retry)
+static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 blocks,
+				 u8 **payload, bool *retry)
 {
 	bool irq = IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_INQUIRY_IRQ_DIAG);
 	struct utp_devman_cmd_desc *ucd = hba->devman_ucd_base_addr;
@@ -11537,11 +11539,18 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 **pa
 		len = UFS_LINK_CAPACITY_LEN;
 		break;
 	case READ_10:
-		if (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_LBA0_DIAG) || !irq || lba > 1 ||
-		    (lba == 1 && !IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_HEADER_DIAG)))
+		if (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_LBA0_DIAG) || !irq)
 			return -EOPNOTSUPP;
+		if (lba == 2) {
+			if (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_ENTRIES_DIAG) ||
+			    !blocks || blocks > UFS_LINK_GPT_MAX_BLOCKS)
+				return -EOPNOTSUPP;
+		} else if (lba > 1 || blocks != 1 ||
+			   (lba == 1 && !IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_HEADER_DIAG))) {
+			return -EOPNOTSUPP;
+		}
 		name = "READ(10)";
-		len = SZ_4K;
+		len = blocks * SZ_4K;
 		break;
 	default:
 		return -EINVAL;
@@ -11567,7 +11576,7 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 lba, u8 **pa
 		req->sc.cdb[4] = len;
 	else if (opcode == READ_10) {
 		req->sc.cdb[5] = lba;
-		req->sc.cdb[8] = 1;
+		req->sc.cdb[8] = blocks;
 	}
 
 	*prd = (struct ufshcd_sg_entry) {
@@ -11619,7 +11628,7 @@ static int ufshcd_link_inquiry(struct ufs_hba *hba)
 	u8 *data;
 	int ret;
 
-	ret = ufshcd_link_scsi_read(hba, INQUIRY, 0, &data, NULL);
+	ret = ufshcd_link_scsi_read(hba, INQUIRY, 0, 0, &data, NULL);
 	if (ret)
 		return ret;
 
@@ -11631,17 +11640,18 @@ static int ufshcd_link_inquiry(struct ufs_hba *hba)
 	return 0;
 }
 
-static int ufshcd_link_read_capacity(struct ufs_hba *hba, u32 *logical_block_size)
+static int ufshcd_link_read_capacity(struct ufs_hba *hba, u32 *logical_block_size,
+				     u32 *last_block)
 {
 	u32 last_lba, block_size;
 	bool retry = false;
 	u8 *data;
 	int ret;
 
-	ret = ufshcd_link_scsi_read(hba, READ_CAPACITY, 0, &data, &retry);
+	ret = ufshcd_link_scsi_read(hba, READ_CAPACITY, 0, 0, &data, &retry);
 	if (retry) {
 		dev_info(hba->dev, "ufs-uic-v55 READ CAPACITY(10) retry after current reset UNIT ATTENTION\n");
-		ret = ufshcd_link_scsi_read(hba, READ_CAPACITY, 0, &data, NULL);
+		ret = ufshcd_link_scsi_read(hba, READ_CAPACITY, 0, 0, &data, NULL);
 	}
 	if (ret)
 		return ret;
@@ -11660,6 +11670,7 @@ static int ufshcd_link_read_capacity(struct ufs_hba *hba, u32 *logical_block_siz
 	dev_info(hba->dev, "ufs-uic-v53 READ CAPACITY(10) capacity_bytes=%llu\n",
 		 (last_lba + 1ULL) * block_size);
 	*logical_block_size = block_size;
+	*last_block = last_lba;
 	return 0;
 }
 
@@ -11672,7 +11683,7 @@ static int ufshcd_link_read_lba0(struct ufs_hba *hba, u32 logical_block_size)
 	if (logical_block_size != SZ_4K)
 		return -EPROTO;
 
-	ret = ufshcd_link_scsi_read(hba, READ_10, 0, &data, NULL);
+	ret = ufshcd_link_scsi_read(hba, READ_10, 0, 1, &data, NULL);
 	if (ret)
 		return ret;
 
@@ -11704,23 +11715,57 @@ static int ufshcd_link_validate_gpt_header(u8 *data)
 	return 0;
 }
 
-static int ufshcd_link_read_gpt_header(struct ufs_hba *hba)
+static int ufshcd_link_read_gpt_entries(struct ufs_hba *hba, const u8 *header, u32 last_lba)
 {
+	u64 first_usable = get_unaligned_le64(header + 40);
+	u64 entries_lba = get_unaligned_le64(header + 72);
+	u32 count = get_unaligned_le32(header + 80);
+	u32 entry_size = get_unaligned_le32(header + 84);
+	u32 bytes, blocks, expected_crc;
 	u8 *data;
 	int ret;
 
-	ret = ufshcd_link_scsi_read(hba, READ_10, 1, &data, NULL);
+	if (entries_lba != 2 || !count || count > 128 || entry_size != 128)
+		return -EPROTO;
+	bytes = count * entry_size;
+	blocks = DIV_ROUND_UP(bytes, SZ_4K);
+	if (first_usable < entries_lba + blocks || first_usable > last_lba)
+		return -EPROTO;
+
+	expected_crc = get_unaligned_le32(header + 88);
+	dev_info(hba->dev, "ufs-uic-v58 GPT entry-array read blocks=%u crc_bytes=%u\n",
+		 blocks, bytes);
+	ret = ufshcd_link_scsi_read(hba, READ_10, 2, blocks, &data, NULL);
 	if (ret)
 		return ret;
 
-	ret = ufshcd_link_validate_gpt_header(data);
-	memzero_explicit(data, SZ_4K);
+	ret = ~crc32_le(~0U, data, bytes) == expected_crc ? 0 : -EBADMSG;
+	memzero_explicit(data, blocks * SZ_4K);
+	return ret;
+}
+
+static int ufshcd_link_read_gpt_header(struct ufs_hba *hba, u32 last_lba)
+{
+	u8 *data = NULL;
+	int ret;
+
+	ret = ufshcd_link_scsi_read(hba, READ_10, 1, 1, &data, NULL);
+	if (!ret)
+		ret = ufshcd_link_validate_gpt_header(data);
+	dev_info(hba->dev, "ufs-uic-v57 READ(10) LUN 0 LBA 1 GPT header result=%d\n", ret);
+
+	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_ENTRIES_DIAG)) {
+		ret = ufshcd_link_read_gpt_entries(hba, data, last_lba);
+		dev_info(hba->dev, "ufs-uic-v58 READ(10) LUN 0 LBA 2 GPT entries result=%d\n", ret);
+	}
+	if (data)
+		memzero_explicit(data, SZ_4K);
 	return ret;
 }
 
 static int ufshcd_link_query_refclk(struct ufs_hba *hba)
 {
-	u32 status, value = 0, logical_block_size = 0;
+	u32 status, value = 0, logical_block_size = 0, last_lba = 0;
 	int ret;
 
 	if (!hba->lsdb_sup || hba->mcq_enabled ||
@@ -11763,17 +11808,15 @@ static int ufshcd_link_query_refclk(struct ufs_hba *hba)
 		dev_info(hba->dev, "ufs-uic-v50 INQUIRY result=%d\n", ret);
 	}
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_CAPACITY_DIAG)) {
-		ret = ufshcd_link_read_capacity(hba, &logical_block_size);
+		ret = ufshcd_link_read_capacity(hba, &logical_block_size, &last_lba);
 		dev_info(hba->dev, "ufs-uic-v53 READ CAPACITY(10) result=%d\n", ret);
 	}
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_LBA0_DIAG)) {
 		ret = ufshcd_link_read_lba0(hba, logical_block_size);
 		dev_info(hba->dev, "ufs-uic-v56 READ(10) result=%d\n", ret);
 	}
-	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_HEADER_DIAG)) {
-		ret = ufshcd_link_read_gpt_header(hba);
-		dev_info(hba->dev, "ufs-uic-v57 READ(10) LUN 0 LBA 1 GPT header result=%d\n", ret);
-	}
+	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_HEADER_DIAG))
+		ret = ufshcd_link_read_gpt_header(hba, last_lba);
 
 	ufshcd_writel(hba, 0, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
 	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) && !ret)
