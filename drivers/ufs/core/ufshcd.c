@@ -11369,6 +11369,11 @@ static int ufshcd_link_midlayer_tur(struct ufs_hba *hba)
 	    UTP_TRANSFER_REQ_LIST_RUN_STOP_BIT)
 		return -EIO;
 
+	/* The test addresses LUN 0 in the UPIU, not the pseudo-device's LUN. */
+	host->pseudo_sdev->lun_in_cdb = 0;
+	dev_info(hba->dev, "ufs-uic-v63 TUR pseudo-device lun_in_cdb=%u\n",
+		 host->pseudo_sdev->lun_in_cdb);
+
 	WRITE_ONCE(hba->link_scsi_phase, UFS_LINK_SCSI_ARMED);
 	ufshcd_enable_intr(hba, UTP_TRANSFER_REQ_COMPL);
 	scsi_unblock_requests(host);
