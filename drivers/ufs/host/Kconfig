@@ -73,6 +73,15 @@ config SCSI_UFS_MALIBU_QUERY_DIAG
 	  a SCSI host or start task management, scanning or recovery.
 	  Leave disabled outside Grizzly diagnostic builds.
 
+config SCSI_UFS_MALIBU_DEVICE_INIT_DIAG
+	bool "Test Grizzly fDeviceInit before SCSI discovery"
+	depends on SCSI_UFS_MALIBU_QUERY_DIAG
+	help
+	  After the clock query passes, issue one fDeviceInit SET
+	  and wait for the device to clear that flag. Continue with
+	  the link-only teardown and do not enumerate any LUNs.
+	  Leave disabled outside Grizzly diagnostic builds.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM

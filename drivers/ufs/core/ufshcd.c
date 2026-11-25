@@ -11298,15 +11298,37 @@ static int ufshcd_probe_hibern8(struct ufs_hba *hba)
 }
 
 /* No SCSI requests exist in this diagnostic; only slot zero may be rung. */
-static int ufshcd_link_query_submit(struct ufs_hba *hba, bool read_attr, u32 *value)
+static int ufshcd_link_query_submit(struct ufs_hba *hba, enum query_opcode opcode, u32 *value)
 {
 	struct utp_devman_cmd_desc *ucd = hba->devman_ucd_base_addr;
 	struct utp_transfer_req_desc *utrd = hba->utrdl_base_addr;
 	struct utp_upiu_req *req = (void *)ucd->command_upiu;
 	struct utp_upiu_rsp *rsp = (void *)ucd->response_upiu;
-	u8 transaction = read_attr ? UPIU_TRANSACTION_QUERY_RSP : UPIU_TRANSACTION_NOP_IN;
+	bool query = opcode != UPIU_QUERY_OPCODE_NOP;
+	u8 transaction = query ? UPIU_TRANSACTION_QUERY_RSP : UPIU_TRANSACTION_NOP_IN;
 	u32 doorbell;
+	const char *name;
+	u8 idn = 0;
 	int ret;
+
+	switch (opcode) {
+	case UPIU_QUERY_OPCODE_NOP:
+		name = "NOP";
+		break;
+	case UPIU_QUERY_OPCODE_READ_ATTR:
+		name = "READ_ATTR(0x0a)";
+		idn = QUERY_ATTR_IDN_REF_CLK_FREQ;
+		break;
+	case UPIU_QUERY_OPCODE_SET_FLAG:
+	case UPIU_QUERY_OPCODE_READ_FLAG:
+		if (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_DEVICE_INIT_DIAG))
+			return -EOPNOTSUPP;
+		name = opcode == UPIU_QUERY_OPCODE_SET_FLAG ? "SET_FLAG" : "READ_FLAG";
+		idn = QUERY_FLAG_IDN_FDEVICEINIT;
+		break;
+	default:
+		return -EINVAL;
+	}
 
 	memset(req, 0, sizeof(*req));
 	memset(rsp, 0, sizeof(*rsp));
@@ -11315,11 +11337,13 @@ static int ufshcd_link_query_submit(struct ufs_hba *hba, bool read_attr, u32 *va
 		.ocs = OCS_INVALID_COMMAND_STATUS,
 	};
 	utrd->prd_table_length = 0;
-	if (read_attr) {
+	if (query) {
 		req->header.transaction_code = UPIU_TRANSACTION_QUERY_REQ;
-		req->header.query_function = UPIU_QUERY_FUNC_STANDARD_READ_REQUEST;
-		req->qr.opcode = UPIU_QUERY_OPCODE_READ_ATTR;
-		req->qr.idn = QUERY_ATTR_IDN_REF_CLK_FREQ;
+		req->header.query_function = opcode == UPIU_QUERY_OPCODE_SET_FLAG ?
+			UPIU_QUERY_FUNC_STANDARD_WRITE_REQUEST :
+			UPIU_QUERY_FUNC_STANDARD_READ_REQUEST;
+		req->qr.opcode = opcode;
+		req->qr.idn = idn;
 	} else {
 		req->header.transaction_code = UPIU_TRANSACTION_NOP_OUT;
 	}
@@ -11336,22 +11360,51 @@ static int ufshcd_link_query_submit(struct ufs_hba *hba, bool read_attr, u32 *va
 	}
 
 	dma_rmb();
-	dev_info(hba->dev, "ufs-uic-v48 %s response OCS=%#x type=%#x code=%#x\n",
-		 read_attr ? "READ_ATTR(0x0a)" : "NOP", utrd->header.ocs,
-		 rsp->header.transaction_code, rsp->header.response);
+	if (opcode != UPIU_QUERY_OPCODE_READ_FLAG || (utrd->header.ocs & MASK_OCS) ||
+	    rsp->header.response)
+		dev_info(hba->dev, "ufs-uic-v48 %s response OCS=%#x type=%#x code=%#x\n",
+			 name, utrd->header.ocs, rsp->header.transaction_code,
+			 rsp->header.response);
 	if ((utrd->header.ocs & MASK_OCS) != OCS_SUCCESS ||
 	    rsp->header.transaction_code != transaction || rsp->header.task_tag ||
 	    rsp->header.response || rsp->header.data_segment_length)
 		return -EIO;
-	if (read_attr) {
-		if (rsp->qr.opcode != UPIU_QUERY_OPCODE_READ_ATTR ||
-		    rsp->qr.idn != QUERY_ATTR_IDN_REF_CLK_FREQ || rsp->qr.index ||
+	if (query) {
+		if (rsp->qr.opcode != opcode || rsp->qr.idn != idn || rsp->qr.index ||
 		    rsp->qr.selector)
 			return -EIO;
 		*value = be32_to_cpu(rsp->qr.value);
 	}
 
 	return 0;
+}
+
+static int ufshcd_link_query_device_init(struct ufs_hba *hba)
+{
+	ktime_t start, deadline;
+	unsigned int polls = 0;
+	u32 flag = 1;
+	int ret;
+
+	ret = ufshcd_link_query_submit(hba, UPIU_QUERY_OPCODE_SET_FLAG, &flag);
+	dev_info(hba->dev, "ufs-uic-v49 fDeviceInit SET ret=%d\n", ret);
+	if (ret)
+		return ret;
+
+	start = ktime_get();
+	deadline = ktime_add_ms(start, FDEVICEINIT_COMPL_TIMEOUT);
+	do {
+		polls++;
+		ret = ufshcd_link_query_submit(hba, UPIU_QUERY_OPCODE_READ_FLAG, &flag);
+		if (ret || !(flag & 1))
+			break;
+		usleep_range(500, 1000);
+	} while (ktime_before(ktime_get(), deadline));
+	if (!ret && (flag & 1))
+		ret = -ETIMEDOUT;
+	dev_info(hba->dev, "ufs-uic-v49 fDeviceInit raw=%#x polls=%u elapsed_us=%lld ret=%d\n",
+		 flag, polls, ktime_us_delta(ktime_get(), start), ret);
+	return ret;
 }
 
 static int ufshcd_link_query_refclk(struct ufs_hba *hba)
@@ -11383,19 +11436,22 @@ static int ufshcd_link_query_refclk(struct ufs_hba *hba)
 	    UTP_TRANSFER_REQ_LIST_RUN_STOP_BIT)
 		return -EIO;
 
-	ret = ufshcd_link_query_submit(hba, false, &value);
+	ret = ufshcd_link_query_submit(hba, UPIU_QUERY_OPCODE_NOP, &value);
 	if (!ret)
-		ret = ufshcd_link_query_submit(hba, true, &value);
+		ret = ufshcd_link_query_submit(hba, UPIU_QUERY_OPCODE_READ_ATTR, &value);
+	if (!ret) {
+		dev_info(hba->dev, "ufs-uic-v48 bRefClkFreq=%#x expected=%#x (38400000 Hz)\n",
+			 value, REF_CLK_FREQ_38_4_MHZ);
+		if (value != REF_CLK_FREQ_38_4_MHZ)
+			ret = -EINVAL;
+	}
+	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_DEVICE_INIT_DIAG))
+		ret = ufshcd_link_query_device_init(hba);
 
 	ufshcd_writel(hba, 0, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
 	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) && !ret)
 		ret = -EIO;
-	if (ret)
-		return ret;
-
-	dev_info(hba->dev, "ufs-uic-v48 bRefClkFreq=%#x expected=%#x (38400000 Hz)\n",
-		 value, REF_CLK_FREQ_38_4_MHZ);
-	return value == REF_CLK_FREQ_38_4_MHZ ? 0 : -EINVAL;
+	return ret;
 }
 
 /**
