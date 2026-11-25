@@ -176,6 +176,15 @@ config SCSI_UFS_MALIBU_RO_DISK_DIAG
 	  Reject all SCSI requests after the original discovery INQUIRY.
 	  Remove the disk and host before link and controller cleanup.
 
+config SCSI_UFS_MALIBU_RO_DISK_READ_DIAG
+	bool "Compare one Grizzly GPT block through the read-only disk"
+	depends on SCSI_UFS_MALIBU_RO_DISK_DIAG
+	help
+	  Submit one ordinary block-layer read for LUN 0, LBA 1.
+	  Compare its 4 KiB payload with the validated direct GPT read.
+	  Reject all other disk requests, keep partition scans disabled
+	  and remove the disk and host before link and controller cleanup.
+
 config SCSI_UFS_CDNS_PLATFORM
 	tristate "Cadence UFS Controller platform driver"
 	depends on SCSI_UFSHCD_PLATFORM

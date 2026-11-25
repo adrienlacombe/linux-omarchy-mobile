@@ -1074,6 +1074,7 @@ enum ufshcd_mcq_opr {
  * @scsi_host_added: indicates that scsi_add_host() has been called
  * @link_query_only: use the dedicated transfer slot in a link test
  * @link_inquiry_done: armed completion for the link test INQUIRY IRQ
+ * @link_diag_read_bio: exact block request permitted by the GPT diagnostic
  * @link_diag_ro_blocks: live capacity in 4 KiB blocks for the disk diagnostic
  * @link_scsi_phase: one-command dispatch state for the SCSI midlayer test
  * @mcq_sup: is mcq supported by UFSHC
@@ -1267,6 +1268,9 @@ struct ufs_hba {
 	int link_scsi_phase;
 #ifdef CONFIG_SCSI_UFS_MALIBU_RO_DISK_DIAG
 	u64 link_diag_ro_blocks;
+#endif
+#ifdef CONFIG_SCSI_UFS_MALIBU_RO_DISK_READ_DIAG
+	struct bio *link_diag_read_bio;
 #endif
 	bool mcq_sup;
 	bool lsdb_sup;

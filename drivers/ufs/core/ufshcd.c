@@ -13,6 +13,7 @@
 #include <linux/devfreq.h>
 #include <linux/nls.h>
 #include <linux/of.h>
+#include <linux/bio.h>
 #include <linux/bitfield.h>
 #include <linux/bitmap.h>
 #include <linux/blk-pm.h>
@@ -48,11 +49,23 @@ enum {
 	UFS_LINK_SCSI_IDLE,
 	UFS_LINK_SCSI_ARMED,
 	UFS_LINK_SCSI_SENT,
+	UFS_LINK_SCSI_READ_ARMED,
+	UFS_LINK_SCSI_READ_SENT,
 };
 
 enum { UFS_LINK_INQUIRY_LEN = 36 };
 
 static const u8 ufshcd_link_lun_cdb[6] = { INQUIRY, 0, 0, 0, UFS_LINK_INQUIRY_LEN, 0 };
+
+/* READ(10), LBA 1, one logical block. */
+static const u8 ufshcd_link_gpt_cdb[10] = { READ_10, 0, 0, 0, 0, 1, 0, 0, 1, 0 };
+
+static bool ufshcd_link_scsi_sent(struct ufs_hba *hba)
+{
+	int phase = READ_ONCE(hba->link_scsi_phase);
+
+	return phase == UFS_LINK_SCSI_SENT || phase == UFS_LINK_SCSI_READ_SENT;
+}
 
 #define CREATE_TRACE_POINTS
 #include "ufs_trace.h"
@@ -2446,8 +2459,8 @@ static inline void ufshcd_send_command(struct ufs_hba *hba,
 		__set_bit(tag, &hba->outstanding_reqs);
 		ufshcd_writel(hba, 1 << tag, REG_UTP_TRANSFER_REQ_DOOR_BELL);
 		if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_SINGLE_LUN_DIAG) &&
-		    READ_ONCE(hba->link_scsi_phase) == UFS_LINK_SCSI_SENT)
-			dev_info(hba->dev, "ufs-uic-v67 LUN 0 INQUIRY doorbell write tag=%d readback=%#x\n",
+		    ufshcd_link_scsi_sent(hba))
+			dev_info(hba->dev, "ufs-uic-v68 LUN 0 SCSI doorbell write tag=%d readback=%#x\n",
 				 tag, ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL));
 		spin_unlock_irqrestore(&hba->outstanding_lock, flags);
 	}
@@ -3107,6 +3120,20 @@ static bool ufshcd_link_lun_target(const struct ufs_hba *hba, const struct scsi_
 	return sdev->hostdata == hba && sdev->channel == 0 && sdev->id == 0 && sdev->lun == 0;
 }
 
+static bool ufshcd_link_disk_read(struct ufs_hba *hba, struct scsi_cmnd *cmd)
+{
+#ifdef CONFIG_SCSI_UFS_MALIBU_RO_DISK_READ_DIAG
+	struct request *rq = scsi_cmd_to_rq(cmd);
+	struct bio *bio = READ_ONCE(hba->link_diag_read_bio);
+
+	return bio && rq->bio == bio && rq->biotail == bio &&
+	       cmd->device->sdev_state == SDEV_RUNNING && req_op(rq) == REQ_OP_READ &&
+	       blk_rq_pos(rq) == SZ_4K / SECTOR_SIZE && blk_rq_bytes(rq) == SZ_4K;
+#else
+	return false;
+#endif
+}
+
 /**
  * ufshcd_queuecommand - main entry point for SCSI requests
  * @host: SCSI host pointer
@@ -3123,29 +3150,34 @@ static enum scsi_qc_status ufshcd_queuecommand(struct Scsi_Host *host,
 	int tag = scsi_cmd_to_rq(cmd)->tag;
 	int err = 0;
 	struct ufs_hw_queue *hwq = NULL;
+	unsigned int diag_bytes = 0;
 
 	if (link_lun) {
-		bool target = ufshcd_link_lun_target(hba, cmd->device) &&
-			      cmd->device->sdev_state == SDEV_CREATED;
-		bool cdb_match = !memcmp(cmd->cmnd, ufshcd_link_lun_cdb,
-					 sizeof(ufshcd_link_lun_cdb));
-		unsigned int bytes = scsi_bufflen(cmd);
+		/* Pairs with publication of the private GPT read bio. */
+		int phase = smp_load_acquire(&hba->link_scsi_phase);
+		bool read = phase == UFS_LINK_SCSI_READ_ARMED;
+		const u8 *cdb = read ? ufshcd_link_gpt_cdb : ufshcd_link_lun_cdb;
+		unsigned int len = read ? sizeof(ufshcd_link_gpt_cdb) : sizeof(ufshcd_link_lun_cdb);
+		int armed = read ? UFS_LINK_SCSI_READ_ARMED : UFS_LINK_SCSI_ARMED;
+		int sent = read ? UFS_LINK_SCSI_READ_SENT : UFS_LINK_SCSI_SENT;
+		bool target = ufshcd_link_lun_target(hba, cmd->device);
+		bool request = read ? ufshcd_link_disk_read(hba, cmd) :
+			       cmd->device->sdev_state == SDEV_CREATED;
 
-		if (!target || bytes != UFS_LINK_INQUIRY_LEN ||
-		    cmd->sc_data_direction != DMA_FROM_DEVICE || scsi_sg_count(cmd) != 1 ||
-		    cmd->cmd_len != sizeof(ufshcd_link_lun_cdb) ||
-		    !cdb_match || cmpxchg(&hba->link_scsi_phase, UFS_LINK_SCSI_ARMED,
-					  UFS_LINK_SCSI_SENT) != UFS_LINK_SCSI_ARMED) {
+		diag_bytes = read ? SZ_4K : UFS_LINK_INQUIRY_LEN;
+		if (!target || !request || phase != armed ||
+		    scsi_bufflen(cmd) != diag_bytes || cmd->sc_data_direction != DMA_FROM_DEVICE ||
+		    scsi_sg_count(cmd) != 1 || cmd->cmd_len != len || memcmp(cmd->cmnd, cdb, len) ||
+		    cmpxchg(&hba->link_scsi_phase, armed, sent) != armed) {
 			dev_info(hba->dev,
-				 "ufs-uic-v67 LUN 0 INQUIRY gate reject tag=%d phase=%d target=%u bytes=%u dir=%u sg=%u cmd_len=%u cdb_match=%u lun_in_cdb=%u\n",
-				 tag, READ_ONCE(hba->link_scsi_phase), target, bytes,
-				 cmd->sc_data_direction, scsi_sg_count(cmd),
-				 cmd->cmd_len, cdb_match, cmd->device->lun_in_cdb);
+				 "ufs-uic-v68 LUN 0 SCSI gate reject tag=%d phase=%d opcode=%#x bytes=%u\n",
+				 tag, phase, cmd->cmnd[0], scsi_bufflen(cmd));
 			set_host_byte(cmd, DID_TRANSPORT_FAILFAST);
 			scsi_done(cmd);
 			return 0;
 		}
-		dev_info(hba->dev, "ufs-uic-v67 LUN 0 INQUIRY gate accepted tag=%d\n", tag);
+		dev_info(hba->dev, "ufs-uic-v68 LUN 0 SCSI gate accepted tag=%d phase=%d opcode=%#x\n",
+			 tag, sent, cmd->cmnd[0]);
 		goto send;
 	}
 	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG) && hba->link_query_only)
@@ -3206,11 +3238,11 @@ send:
 	if (link_lun) {
 		unsigned int bytes = err ? 0 : sg_dma_len(scsi_sglist(cmd));
 
-		if (!err && bytes != UFS_LINK_INQUIRY_LEN) {
+		if (!err && bytes != diag_bytes) {
 			scsi_dma_unmap(cmd);
 			err = -EIO;
 		}
-		dev_info(hba->dev, "ufs-uic-v67 LUN 0 INQUIRY map tag=%d ret=%d sg=%u direction=%u bytes=%u\n",
+		dev_info(hba->dev, "ufs-uic-v68 LUN 0 SCSI map tag=%d ret=%d sg=%u direction=%u bytes=%u\n",
 			 tag, err, scsi_sg_count(cmd), cmd->sc_data_direction, bytes);
 	}
 	if (err) {
@@ -6037,15 +6069,19 @@ static void ufshcd_link_check_lun_response(struct ufs_hba *hba, struct scsi_cmnd
 	int tag = scsi_cmd_to_rq(cmd)->tag;
 	u32 residual = be32_to_cpu(lrb->ucd_rsp_ptr->sr.residual_transfer_count);
 
-	dev_info(hba->dev, "ufs-uic-v67 LUN 0 INQUIRY IRQ tag=%d OCS=%#x type=%#x response=%#x status=%#x raw=%#x residual=%u\n",
-		 tag, ocs, rsp->transaction_code, rsp->response, rsp->status, cmd->result,
-		 residual);
+	dev_info(hba->dev, "ufs-uic-v68 LUN 0 SCSI IRQ tag=%d opcode=%#x OCS=%#x type=%#x response=%#x status=%#x raw=%#x residual=%u\n",
+		 tag, cmd->cmnd[0], ocs, rsp->transaction_code, rsp->response,
+		 rsp->status, cmd->result, residual);
 	if (cmd->result || ocs != OCS_SUCCESS ||
 	    rsp->transaction_code != UPIU_TRANSACTION_RESPONSE ||
 	    rsp->lun || rsp->task_tag != tag || rsp->response || rsp->ehs_length ||
 	    rsp->data_segment_length || residual ||
-	    (rsp->flags & (UPIU_RSP_FLAG_UNDERFLOW | UPIU_RSP_FLAG_OVERFLOW)))
-		set_host_byte(cmd, DID_TRANSPORT_FAILFAST);
+	    (rsp->flags & (UPIU_RSP_FLAG_UNDERFLOW | UPIU_RSP_FLAG_OVERFLOW))) {
+		cmd->result = DID_TRANSPORT_FAILFAST << 16;
+		scsi_set_resid(cmd, scsi_bufflen(cmd));
+		memset(cmd->sense_buffer, 0, SCSI_SENSE_BUFFERSIZE);
+		cmd->sense_len = 0;
+	}
 }
 
 /**
@@ -6075,7 +6111,7 @@ void ufshcd_compl_one_cqe(struct ufs_hba *hba, int task_tag,
 		ufshcd_add_command_trace(hba, cmd, UFS_CMD_COMP);
 		cmd->result = ufshcd_transfer_rsp_status(hba, cmd, cqe);
 		if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_SINGLE_LUN_DIAG) &&
-		    READ_ONCE(hba->link_scsi_phase) == UFS_LINK_SCSI_SENT)
+		    ufshcd_link_scsi_sent(hba))
 			ufshcd_link_check_lun_response(hba, cmd, lrbp,
 						       ufshcd_get_tr_ocs(lrbp, cqe));
 		ufshcd_release_scsi_cmd(hba, cmd);
@@ -9790,7 +9826,7 @@ static enum scsi_timeout_action ufshcd_link_lun_timeout(struct ufs_hba *hba,
 	if (ret)
 		ufshcd_hba_stop(hba);
 
-	dev_err(hba->dev, "ufs-uic-v67 LUN 0 INQUIRY timeout tag=%d clear=%d hce=%#x\n",
+	dev_err(hba->dev, "ufs-uic-v68 LUN 0 SCSI timeout tag=%d clear=%d hce=%#x\n",
 		tag, ret, ufshcd_readl(hba, REG_CONTROLLER_ENABLE));
 	if (ret && (ufshcd_readl(hba, REG_CONTROLLER_ENABLE) & CONTROLLER_ENABLE) &&
 	    (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL) & BIT(tag))) {
@@ -9798,7 +9834,7 @@ static enum scsi_timeout_action ufshcd_link_lun_timeout(struct ufs_hba *hba,
 		 * Keep the request and DMA mapping live. An orderly reboot may
 		 * wait for this probe, so bypass device shutdown.
 		 */
-		dev_emerg(hba->dev, "ufs-uic-v67 LUN 0 INQUIRY DMA still active; emergency restart\n");
+		dev_emerg(hba->dev, "ufs-uic-v68 LUN 0 SCSI DMA still active; emergency restart\n");
 		emergency_restart();
 		return SCSI_EH_RESET_TIMER;
 	}
@@ -11408,7 +11444,99 @@ static bool ufshcd_link_inquiry_valid(const u8 *data)
 	       data[4] >= UFS_LINK_INQUIRY_LEN - 5;
 }
 
-static int ufshcd_link_observe_ro_disk(struct ufs_hba *hba, struct scsi_device *sdev)
+static int ufshcd_link_start_scsi(struct ufs_hba *hba)
+{
+	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL) ||
+	    ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) ||
+	    !(ufshcd_readl(hba, REG_CONTROLLER_STATUS) & UTP_TRANSFER_REQ_LIST_READY))
+		return -EIO;
+
+	ufshcd_writel(hba, UTP_TRANSFER_REQ_COMPL, REG_INTERRUPT_STATUS);
+	if (ufshcd_readl(hba, REG_INTERRUPT_STATUS) & UTP_TRANSFER_REQ_COMPL)
+		return -EIO;
+	ufshcd_writel(hba, UTP_TRANSFER_REQ_LIST_RUN_STOP_BIT, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
+	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) !=
+	    UTP_TRANSFER_REQ_LIST_RUN_STOP_BIT)
+		return -EIO;
+
+	return 0;
+}
+
+static int ufshcd_link_stop_scsi(struct ufs_hba *hba)
+{
+	ufshcd_disable_intr(hba, UTP_TRANSFER_REQ_COMPL);
+	ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
+	synchronize_irq(hba->irq);
+	WRITE_ONCE(hba->link_scsi_phase, UFS_LINK_SCSI_IDLE);
+	ufshcd_writel(hba, 0, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
+	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) ||
+	    ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL))
+		return -EIO;
+	return 0;
+}
+
+static int ufshcd_link_read_disk_gpt(struct ufs_hba *hba, struct gendisk *disk,
+				     const u8 *reference)
+{
+#ifdef CONFIG_SCSI_UFS_MALIBU_RO_DISK_READ_DIAG
+	unsigned int timeout = disk->queue->rq_timeout;
+	struct page *page;
+	struct bio *bio;
+	int ret, stop;
+
+	if (!reference)
+		return -EINVAL;
+
+	page = alloc_page(GFP_NOIO | __GFP_ZERO);
+	if (!page)
+		return -ENOMEM;
+	bio = bio_alloc(disk->part0, 1, REQ_OP_READ | REQ_SYNC | REQ_NOMERGE, GFP_NOIO);
+	if (!bio) {
+		ret = -ENOMEM;
+		goto free_page;
+	}
+	bio->bi_iter.bi_sector = SZ_4K / SECTOR_SIZE;
+	if (bio_add_page(bio, page, SZ_4K, 0) != SZ_4K) {
+		ret = -EIO;
+		goto put_bio;
+	}
+
+	ret = ufshcd_link_start_scsi(hba);
+	if (ret)
+		goto put_bio;
+	blk_queue_rq_timeout(disk->queue, HZ);
+	WRITE_ONCE(hba->link_diag_read_bio, bio);
+	/* Publish the bio before the dispatcher sees the read phase. */
+	smp_store_release(&hba->link_scsi_phase, UFS_LINK_SCSI_READ_ARMED);
+	ufshcd_enable_intr(hba, UTP_TRANSFER_REQ_COMPL);
+
+	ret = submit_bio_wait(bio);
+	if (!ret && READ_ONCE(hba->link_scsi_phase) != UFS_LINK_SCSI_READ_SENT)
+		ret = -EIO;
+
+	stop = ufshcd_link_stop_scsi(hba);
+	WRITE_ONCE(hba->link_diag_read_bio, NULL);
+	blk_queue_rq_timeout(disk->queue, timeout);
+	if (!ret)
+		ret = stop;
+	if (!ret && memcmp(page_address(page), reference, SZ_4K))
+		ret = -EBADMSG;
+	dev_info(hba->dev, "ufs-uic-v68 LUN 0 block GPT comparison bytes=%u ret=%d\n",
+		 SZ_4K, ret);
+
+put_bio:
+	bio_put(bio);
+free_page:
+	memzero_explicit(page_address(page), SZ_4K);
+	__free_page(page);
+	return ret;
+#else
+	return 0;
+#endif
+}
+
+static int ufshcd_link_observe_ro_disk(struct ufs_hba *hba, struct scsi_device *sdev,
+				       const u8 *reference)
 {
 #ifdef CONFIG_SCSI_UFS_MALIBU_RO_DISK_DIAG
 	struct gendisk *disk;
@@ -11426,13 +11554,14 @@ static int ufshcd_link_observe_ro_disk(struct ufs_hba *hba, struct scsi_device *
 	    (disk->flags & GENHD_FL_NO_PART) &&
 	    queue_logical_block_size(disk->queue) == SZ_4K &&
 	    get_capacity(disk) == sdev->malibu_diag_ro_blocks * (SZ_4K / SECTOR_SIZE)) {
-		dev_info(hba->dev, "ufs-uic-v67 LUN 0 disk read-only sectors=%llu block_size=%u no_part=1\n",
+		dev_info(hba->dev, "ufs-uic-v68 LUN 0 disk read-only sectors=%llu block_size=%u no_part=1\n",
 			 (unsigned long long)get_capacity(disk), SZ_4K);
-		/* Let the RAM stage sample sysfs without opening the block device. */
-		msleep(4000);
-		ret = 0;
+		ret = ufshcd_link_read_disk_gpt(hba, disk, reference);
+		if (!ret)
+			/* Let the RAM stage sample sysfs without opening the disk. */
+			msleep(4000);
 	} else {
-		dev_err(hba->dev, "ufs-uic-v67 LUN 0 disk verification failed attach=%d\n", ret);
+		dev_err(hba->dev, "ufs-uic-v68 LUN 0 disk verification failed attach=%d\n", ret);
 		ret = ret < 0 ? ret : -EIO;
 	}
 	scsi_block_requests(hba->host);
@@ -11442,61 +11571,46 @@ static int ufshcd_link_observe_ro_disk(struct ufs_hba *hba, struct scsi_device *
 #endif
 }
 
-static int ufshcd_link_scan_lun(struct ufs_hba *hba)
+static int ufshcd_link_scan_lun(struct ufs_hba *hba, const u8 *reference)
 {
 	struct Scsi_Host *host = hba->host;
 	struct scsi_device *sdev;
 	int ret;
 
-	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL) ||
-	    ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) ||
-	    !(ufshcd_readl(hba, REG_CONTROLLER_STATUS) & UTP_TRANSFER_REQ_LIST_READY))
-		return -EIO;
-
-	ufshcd_writel(hba, UTP_TRANSFER_REQ_COMPL, REG_INTERRUPT_STATUS);
-	if (ufshcd_readl(hba, REG_INTERRUPT_STATUS) & UTP_TRANSFER_REQ_COMPL)
-		return -EIO;
-	ufshcd_writel(hba, UTP_TRANSFER_REQ_LIST_RUN_STOP_BIT, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
-	if (ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP) !=
-	    UTP_TRANSFER_REQ_LIST_RUN_STOP_BIT)
-		return -EIO;
+	ret = ufshcd_link_start_scsi(hba);
+	if (ret)
+		return ret;
 
 	WRITE_ONCE(hba->link_scsi_phase, UFS_LINK_SCSI_ARMED);
 	ufshcd_enable_intr(hba, UTP_TRANSFER_REQ_COMPL);
 	scsi_unblock_requests(host);
 	sdev = __scsi_add_device(host, 0, 0, 0, hba);
 	scsi_block_requests(host);
-	ufshcd_disable_intr(hba, UTP_TRANSFER_REQ_COMPL);
-	ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
-	synchronize_irq(hba->irq);
-	WRITE_ONCE(hba->link_scsi_phase, UFS_LINK_SCSI_IDLE);
-	ufshcd_writel(hba, 0, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP);
+	ret = ufshcd_link_stop_scsi(hba);
 
 	if (IS_ERR(sdev)) {
 		ret = PTR_ERR(sdev);
-		dev_info(hba->dev, "ufs-uic-v67 LUN 0 add ret=%d\n", ret);
+		dev_info(hba->dev, "ufs-uic-v68 LUN 0 add ret=%d\n", ret);
 		return ret;
 	}
 
-	ret = 0;
 	if (!ufshcd_link_lun_target(hba, sdev) ||
 	    !sdev->is_visible || sdev->sdev_state != SDEV_RUNNING ||
 	    sdev->type != TYPE_DISK || sdev->inq_periph_qual || !sdev->no_uld_attach ||
 	    sdev->inquiry_len != UFS_LINK_INQUIRY_LEN ||
-	    device_is_bound(&sdev->sdev_gendev) ||
-	    ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_LIST_RUN_STOP))
+	    device_is_bound(&sdev->sdev_gendev))
 		ret = -EIO;
-	dev_info(hba->dev, "ufs-uic-v67 LUN 0 child visible=%u state=%u type=%u inquiry_len=%u no_uld=%u ret=%d\n",
+	dev_info(hba->dev, "ufs-uic-v68 LUN 0 child visible=%u state=%u type=%u inquiry_len=%u no_uld=%u ret=%d\n",
 		 sdev->is_visible, sdev->sdev_state, sdev->type, sdev->inquiry_len,
 		 sdev->no_uld_attach, ret);
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_RO_DISK_DIAG))
-		ret = ufshcd_link_observe_ro_disk(hba, sdev);
+		ret = ufshcd_link_observe_ro_disk(hba, sdev, reference);
 	scsi_remove_device(sdev);
 	scsi_device_put(sdev);
 	return ret;
 }
 
-static int ufshcd_link_probe_scsi_host(struct ufs_hba *hba)
+static int ufshcd_link_probe_scsi_host(struct ufs_hba *hba, const u8 *reference)
 {
 	struct Scsi_Host *host = hba->host;
 	struct scsi_device *sdev;
@@ -11520,7 +11634,7 @@ static int ufshcd_link_probe_scsi_host(struct ufs_hba *hba)
 
 		dev_info(hba->dev, "ufs-uic-v59 SCSI host registered devices=%u\n", devices);
 		if (!devices && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_SINGLE_LUN_DIAG))
-			ret = ufshcd_link_scan_lun(hba);
+			ret = ufshcd_link_scan_lun(hba, reference);
 		ufshcd_remove_scsi_host(hba);
 		ufshcd_free_tmf_queue(hba);
 		dev_info(hba->dev, "ufs-uic-v59 SCSI host removed state=%u\n",
@@ -12071,7 +12185,7 @@ static int ufshcd_link_read_gpt_entries(struct ufs_hba *hba, const u8 *header, u
 	return ret;
 }
 
-static int ufshcd_link_read_gpt_header(struct ufs_hba *hba, u32 last_lba)
+static int ufshcd_link_read_gpt_header(struct ufs_hba *hba, u32 last_lba, u8 *reference)
 {
 	struct ufs_link_payload payload = {};
 	int ret;
@@ -12085,6 +12199,8 @@ static int ufshcd_link_read_gpt_header(struct ufs_hba *hba, u32 last_lba)
 		ret = ufshcd_link_read_gpt_entries(hba, payload.data, last_lba);
 		dev_info(hba->dev, "ufs-uic-v58 READ(10) LUN 0 LBA 2 GPT entries result=%d\n", ret);
 	}
+	if (!ret && reference)
+		memcpy(reference, payload.data, SZ_4K);
 	if (payload.data)
 		memzero_explicit(payload.data, SZ_4K);
 	return ret;
@@ -12134,7 +12250,7 @@ static int ufshcd_link_report_luns(struct ufs_hba *hba)
 	return ret;
 }
 
-static int ufshcd_link_query_refclk(struct ufs_hba *hba)
+static int ufshcd_link_query_refclk(struct ufs_hba *hba, u8 *reference)
 {
 	u32 status, value = 0, logical_block_size = 0, last_lba = 0;
 	int ret;
@@ -12191,7 +12307,7 @@ static int ufshcd_link_query_refclk(struct ufs_hba *hba)
 		dev_info(hba->dev, "ufs-uic-v56 READ(10) result=%d\n", ret);
 	}
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_GPT_HEADER_DIAG))
-		ret = ufshcd_link_read_gpt_header(hba, last_lba);
+		ret = ufshcd_link_read_gpt_header(hba, last_lba, reference);
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_REPORT_LUNS_DIAG)) {
 		ret = ufshcd_link_report_luns(hba);
 		dev_info(hba->dev, "ufs-uic-v60 REPORT LUNS result=%d\n", ret);
@@ -12205,12 +12321,19 @@ static int ufshcd_link_query_refclk(struct ufs_hba *hba)
 
 static int ufshcd_link_run_diagnostics(struct ufs_hba *hba)
 {
+	u8 *reference __free(kfree_sensitive) = NULL;
 	int ret;
 
-	ret = ufshcd_link_query_refclk(hba);
+	if (IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_RO_DISK_READ_DIAG)) {
+		reference = kmalloc(SZ_4K, GFP_KERNEL);
+		if (!reference)
+			return -ENOMEM;
+	}
+
+	ret = ufshcd_link_query_refclk(hba, reference);
 	dev_info(hba->dev, "ufs-uic-v48 device query result=%d\n", ret);
 	if (!ret && IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_HOST_REGISTRATION_DIAG)) {
-		ret = ufshcd_link_probe_scsi_host(hba);
+		ret = ufshcd_link_probe_scsi_host(hba, reference);
 		dev_info(hba->dev, "ufs-uic-v59 SCSI host lifecycle ret=%d\n", ret);
 	}
 	return ret;
