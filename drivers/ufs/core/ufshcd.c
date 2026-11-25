@@ -11484,7 +11484,8 @@ enum {
 	UFS_LINK_CAPACITY_LEN = 8,
 };
 
-static void ufshcd_link_log_sense(struct ufs_hba *hba, const char *name,
+/* Return true for the current reset UNIT ATTENTION observed on D1. */
+static bool ufshcd_link_log_sense(struct ufs_hba *hba, const char *name,
 				  const struct utp_upiu_rsp *rsp)
 {
 	const u8 *sense = rsp->sr.sense_data;
@@ -11499,15 +11500,17 @@ static void ufshcd_link_log_sense(struct ufs_hba *hba, const char *name,
 	    (hdr.response_code < 0x72 && (sense_len < 14 || sense[7] < 6))) {
 		dev_info(hba->dev, "ufs-uic-v54 %s CHECK CONDITION sense unavailable segment=%u len=%u\n",
 			 name, segment_len, sense_len);
-		return;
+		return false;
 	}
 
 	dev_info(hba->dev,
 		 "ufs-uic-v54 %s CHECK CONDITION sense format=%#x key=%#x asc=%#x ascq=%#x len=%u\n",
 		 name, hdr.response_code, hdr.sense_key, hdr.asc, hdr.ascq, sense_len);
+	return (hdr.response_code == 0x70 || hdr.response_code == 0x72) &&
+	       hdr.sense_key == UNIT_ATTENTION && hdr.asc == 0x29 && hdr.ascq == 0;
 }
 
-static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 **payload)
+static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 **payload, bool *retry)
 {
 	bool irq = IS_ENABLED(CONFIG_SCSI_UFS_MALIBU_INQUIRY_IRQ_DIAG);
 	struct utp_devman_cmd_desc *ucd = hba->devman_ucd_base_addr;
@@ -11583,8 +11586,13 @@ static int ufshcd_link_scsi_read(struct ufs_hba *hba, u8 opcode, u8 **payload)
 	    rsp->header.transaction_code != UPIU_TRANSACTION_RESPONSE ||
 	    rsp->header.lun || rsp->header.task_tag || rsp->header.ehs_length)
 		return -EIO;
-	if (rsp->header.status == SAM_STAT_CHECK_CONDITION)
-		ufshcd_link_log_sense(hba, name, rsp);
+	if (rsp->header.status == SAM_STAT_CHECK_CONDITION) {
+		bool reset_attention = ufshcd_link_log_sense(hba, name, rsp);
+
+		if (retry && opcode == READ_CAPACITY && rsp->header.response == 1 &&
+		    reset_attention)
+			*retry = true;
+	}
 	if (rsp->header.response || rsp->header.status != SAM_STAT_GOOD ||
 	    rsp->header.data_segment_length || rsp->sr.residual_transfer_count ||
 	    (rsp->header.flags & (UPIU_RSP_FLAG_UNDERFLOW | UPIU_RSP_FLAG_OVERFLOW)))
@@ -11599,7 +11607,7 @@ static int ufshcd_link_inquiry(struct ufs_hba *hba)
 	u8 *data;
 	int ret;
 
-	ret = ufshcd_link_scsi_read(hba, INQUIRY, &data);
+	ret = ufshcd_link_scsi_read(hba, INQUIRY, &data, NULL);
 	if (ret)
 		return ret;
 
@@ -11614,10 +11622,15 @@ static int ufshcd_link_inquiry(struct ufs_hba *hba)
 static int ufshcd_link_read_capacity(struct ufs_hba *hba)
 {
 	u32 last_lba, block_size;
+	bool retry = false;
 	u8 *data;
 	int ret;
 
-	ret = ufshcd_link_scsi_read(hba, READ_CAPACITY, &data);
+	ret = ufshcd_link_scsi_read(hba, READ_CAPACITY, &data, &retry);
+	if (retry) {
+		dev_info(hba->dev, "ufs-uic-v55 READ CAPACITY(10) retry after current reset UNIT ATTENTION\n");
+		ret = ufshcd_link_scsi_read(hba, READ_CAPACITY, &data, NULL);
+	}
 	if (ret)
 		return ret;
 
