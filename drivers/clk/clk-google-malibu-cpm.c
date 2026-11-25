@@ -1139,13 +1139,20 @@ out:
 }
 
 static int malibu_ufs_prep_off_status(struct malibu_cpm *cpm,
-				      struct malibu_ufs_psm_sample *sample)
+				      struct malibu_ufs_psm_sample *sample,
+				      bool *saw_hc_transition)
 {
 	malibu_ufs_sample_psms(&cpm->ufs_psm, sample);
 	if (!sample->children_valid)
 		return -EHOSTDOWN;
 	if ((sample->phy & 0x1f) != 0x11)
 		return -EIO;
+
+	/* D1 sampled 0x32 on the way from 0x10 to 0x13 after prep OFF. */
+	if (sample->hc == 0x32) {
+		*saw_hc_transition = true;
+		return -EINPROGRESS;
+	}
 
 	switch (sample->hc & 0x1f) {
 	case 0x13:
@@ -1160,21 +1167,24 @@ static int malibu_ufs_prep_off_status(struct malibu_cpm *cpm,
 static bool malibu_ufs_wait_prep_off(struct malibu_cpm *cpm)
 {
 	struct malibu_ufs_psm_sample initial = {}, final;
+	bool saw_hc_transition = false;
 	ktime_t start = ktime_get();
 	s64 elapsed_us;
 	int status, ret = 0;
 
-	status = malibu_ufs_prep_off_status(cpm, &initial);
+	status = malibu_ufs_prep_off_status(cpm, &initial, &saw_hc_transition);
 	final = initial;
 	if (status == -EINPROGRESS)
 		ret = read_poll_timeout(malibu_ufs_prep_off_status, status,
 					status != -EINPROGRESS, 20, 10000,
-					true, cpm, &final);
+					true, cpm, &final, &saw_hc_transition);
 	elapsed_us = ktime_us_delta(ktime_get(), start);
 	malibu_ufs_log_psms(cpm->dev, "ufs-uic-v45 prep-off-initial", &initial);
 	malibu_ufs_log_psms(cpm->dev, "ufs-uic-v40 prep-off-after", &final);
 	dev_info(cpm->dev, "ufs-uic-v45 prep OFF settling elapsed_us=%lld qualification=%d\n",
 		 elapsed_us, ret ?: status);
+
+	dev_info(cpm->dev, "ufs-uic-v52 prep OFF saw_hc_0x32=%u\n", saw_hc_transition);
 
 	return !ret && !status;
 }
