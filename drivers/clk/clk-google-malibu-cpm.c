@@ -906,7 +906,7 @@ static int malibu_mbfs_lookup(struct malibu_cpm *cpm, u32 parent, const char *na
 	return 0;
 }
 
-static int malibu_mbfs_root(struct malibu_cpm *cpm, u32 *root)
+static int malibu_mbfs_root(struct malibu_cpm *cpm, u32 *root, u32 *namespace_root)
 {
 	static const char * const path[] = { "syspm", "clients", "vm1" };
 	u32 payload[3] = {}, reply[3];
@@ -925,6 +925,7 @@ static int malibu_mbfs_root(struct malibu_cpm *cpm, u32 *root)
 	if (FIELD_GET(MALIBU_MBFS_STATUS, reply[0]))
 		return -ENOENT;
 	*root = FIELD_GET(MALIBU_MBFS_HANDLE, reply[0]);
+	*namespace_root = *root;
 
 	for (i = 0; i < ARRAY_SIZE(path); i++) {
 		ret = malibu_mbfs_lookup(cpm, *root, path[i], root);
@@ -986,7 +987,7 @@ static void malibu_cpm_query_display(struct malibu_cpm *cpm)
 	dev_info(cpm->dev, "display-cpm: read-only queries complete\n");
 }
 
-static int malibu_mbfs_read_vote(struct malibu_cpm *cpm, u32 handle, bool *on)
+static int malibu_mbfs_read_value(struct malibu_cpm *cpm, u32 handle, u64 *value)
 {
 	const u32 payload[] = { MALIBU_MBFS_READ | handle, 0, 0 };
 	u32 reply[3];
@@ -997,9 +998,56 @@ static int malibu_mbfs_read_vote(struct malibu_cpm *cpm, u32 handle, bool *on)
 		return ret;
 	if (FIELD_GET(MALIBU_MBFS_STATUS, reply[0]))
 		return -EREMOTEIO;
-	if (reply[2] || reply[1] > 1)
+	*value = (u64)reply[2] << 32 | reply[1];
+	return 0;
+}
+
+static void malibu_cpm_query_display_perf(struct malibu_cpm *cpm, u32 root)
+{
+	static const char * const path[] = { "cpm", "perf", "domains" };
+	static const char * const domains[] = { "dpu", "fabdisp" };
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < ARRAY_SIZE(path); i++) {
+		ret = malibu_mbfs_lookup(cpm, root, path[i], &root);
+		if (ret) {
+			dev_info(cpm->dev, "display-perf: path segment %s error=%d\n",
+				 path[i], ret);
+			return;
+		}
+	}
+	for (i = 0; i < ARRAY_SIZE(domains); i++) {
+		u32 domain, opp;
+		u64 level;
+
+		ret = malibu_mbfs_lookup(cpm, root, domains[i], &domain);
+		if (ret) {
+			dev_info(cpm->dev, "display-perf: %s lookup error=%d\n", domains[i], ret);
+			continue;
+		}
+		ret = malibu_mbfs_lookup(cpm, domain, "CurOpp", &opp);
+		if (!ret)
+			ret = malibu_mbfs_read_value(cpm, opp, &level);
+		if (ret)
+			dev_info(cpm->dev, "display-perf: %s CurOpp error=%d\n", domains[i], ret);
+		else
+			dev_info(cpm->dev, "display-perf: %s CurOpp handle=0x%x level=%llu\n",
+				 domains[i], opp, level);
+	}
+}
+
+static int malibu_mbfs_read_vote(struct malibu_cpm *cpm, u32 handle, bool *on)
+{
+	u64 value;
+	int ret;
+
+	ret = malibu_mbfs_read_value(cpm, handle, &value);
+	if (ret)
+		return ret;
+	if (value > 1)
 		return -EPROTO;
-	*on = reply[1];
+	*on = value;
 	return 0;
 }
 
@@ -1419,6 +1467,7 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 				 (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU) || malibu_ufs_idle_diag(cpm));
 	const bool prep_release = IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_PREP_RELEASE);
 	bool initially_on[MALIBU_MBFS_DOMAIN_COUNT];
+	u32 namespace_root;
 	unsigned int i;
 	int ret;
 
@@ -1430,7 +1479,7 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 	if (!provider)
 		return -ENOMEM;
 
-	ret = malibu_mbfs_root(cpm, &cpm->mbfs_root);
+	ret = malibu_mbfs_root(cpm, &cpm->mbfs_root, &namespace_root);
 	if (ret)
 		return ret;
 	for (i = 0; i < ARRAY_SIZE(domains); i++) {
@@ -1503,8 +1552,10 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 		return ret;
 
 	provider->published = true;
-	if (display_query && of_machine_is_compatible("google,malibu-grizzly"))
+	if (display_query && of_machine_is_compatible("google,malibu-grizzly")) {
 		malibu_cpm_query_display(cpm);
+		malibu_cpm_query_display_perf(cpm, namespace_root);
+	}
 	return 0;
 }
 
