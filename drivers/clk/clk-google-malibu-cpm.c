@@ -80,6 +80,7 @@
 #define MALIBU_MBFS_DISPLAY_WRAPPER_ID	0x08
 #define MALIBU_MBFS_DISPLAY_BE_ID	0x200
 #define MALIBU_MBFS_DISPLAY_FE0_ID	0x201
+#define MALIBU_MBFS_DISPLAY_DSI0_ID	0x203
 #define MALIBU_MBFS_HSIOS_ID		0x1a
 #define MALIBU_MBFS_UFS_PREP_ID		0x222
 #define MALIBU_MBFS_UFS_CORE_ID		0x220
@@ -1193,6 +1194,8 @@ static int malibu_mbfs_set_vote(struct malibu_cpm *cpm, u32 id, u32 handle, bool
 		diagnostic = "display-be";
 	else if (id == MALIBU_MBFS_DISPLAY_FE0_ID)
 		diagnostic = "display-fe0";
+	else if (id == MALIBU_MBFS_DISPLAY_DSI0_ID)
+		diagnostic = "display-dsi0";
 
 	ret = malibu_cpm_request(cpm, MALIBU_MBFS_DESTINATION, payload,
 				 MALIBU_MBFS_TIMEOUT_MS, id, reply);
@@ -1295,7 +1298,28 @@ static int malibu_cpm_cycle_display_fe0(struct malibu_cpm *cpm, u32 handle)
 	return ret;
 }
 
-static int malibu_cpm_cycle_display_be(struct malibu_cpm *cpm, u32 handle, u32 fe0_handle)
+static bool display_dsi0;
+module_param(display_dsi0, bool, 0400);
+MODULE_PARM_DESC(display_dsi0, "Include a DSI0 vote cycle under Grizzly BE");
+
+static int malibu_cpm_cycle_display_dsi0(struct malibu_cpm *cpm, u32 handle)
+{
+	int ret;
+
+	dev_info(cpm->dev, "display-dsi0: DpuDsi0.v handle=0x%x resource=0x%x\n",
+		 handle, MALIBU_MBFS_DISPLAY_DSI0_ID);
+	ret = malibu_mbfs_set_vote(cpm, MALIBU_MBFS_DISPLAY_DSI0_ID, handle, true);
+	dev_info(cpm->dev, "display-dsi0: on result=%d\n", ret);
+	if (ret)
+		return ret;
+
+	ret = malibu_mbfs_set_vote(cpm, MALIBU_MBFS_DISPLAY_DSI0_ID, handle, false);
+	dev_info(cpm->dev, "display-dsi0: off result=%d\n", ret);
+	return ret;
+}
+
+static int malibu_cpm_cycle_display_be(struct malibu_cpm *cpm, u32 handle, u32 fe0_handle,
+				      u32 dsi0_handle)
 {
 	int ret;
 
@@ -1317,6 +1341,14 @@ static int malibu_cpm_cycle_display_be(struct malibu_cpm *cpm, u32 handle, u32 f
 		ret = malibu_cpm_cycle_display_fe0(cpm, fe0_handle);
 		if (ret) {
 			dev_info(cpm->dev, "display-fe0: release unconfirmed, leaving BE vote for timed return\n");
+			return ret;
+		}
+	}
+
+	if (display_dsi0) {
+		ret = malibu_cpm_cycle_display_dsi0(cpm, dsi0_handle);
+		if (ret) {
+			dev_info(cpm->dev, "display-dsi0: release unconfirmed, leaving BE vote for timed return\n");
 			return ret;
 		}
 	}
@@ -1349,13 +1381,13 @@ static ssize_t display_wrapper_write(struct file *file, const char __user *buf,
 				     size_t count, loff_t *pos)
 {
 	static const char * const children[] = {
-		"DpuFe1.v", "DpuDsi0.v", "DpuDsi1.v", "DpuDp0.v",
+		"DpuFe1.v", "DpuDsi1.v", "DpuDp0.v",
 	};
 	struct malibu_cpm *cpm = container_of(file->private_data, struct malibu_cpm,
 					     display_wrapper_misc);
 	struct device *dev = cpm->dev;
 	char command[4];
-	u32 handle, be_handle, fe0_handle;
+	u32 handle, be_handle, fe0_handle, dsi0_handle;
 	bool on, child_on = false;
 	unsigned int i;
 	int ret;
@@ -1386,6 +1418,9 @@ static ssize_t display_wrapper_write(struct file *file, const char __user *buf,
 	ret = malibu_cpm_sample_display_child(cpm, "DpuFe0.v", &fe0_handle, &child_on);
 	if (ret)
 		return ret;
+	ret = malibu_cpm_sample_display_child(cpm, "DpuDsi0.v", &dsi0_handle, &child_on);
+	if (ret)
+		return ret;
 	for (i = 0; i < ARRAY_SIZE(children); i++) {
 		u32 child;
 
@@ -1404,7 +1439,7 @@ static ssize_t display_wrapper_write(struct file *file, const char __user *buf,
 		return ret;
 
 	if (display_be) {
-		ret = malibu_cpm_cycle_display_be(cpm, be_handle, fe0_handle);
+		ret = malibu_cpm_cycle_display_be(cpm, be_handle, fe0_handle, dsi0_handle);
 		if (ret) {
 			dev_info(dev, "display-be: release unconfirmed, leaving wrapper vote for timed return\n");
 			return ret;
