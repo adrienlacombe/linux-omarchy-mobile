@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/atomic.h>
 #include <linux/bitfield.h>
 #include <linux/bits.h>
 #include <linux/cleanup.h>
@@ -49,6 +50,13 @@
 #define MALIBU_CPM_RESET_TIMEOUT_MS	3000
 #define MALIBU_CPM_DISPLAY_DOMAIN	0x23
 #define MALIBU_CPM_CLOCK_GET_RATE	3
+#define MALIBU_CPM_DVFS_DESTINATION	0x0e
+#define MALIBU_CPM_DVFS_BUDGET_MS	3000
+#define MALIBU_CPM_DVFS_MAX_DOMAINS	48
+#define MALIBU_CPM_DVFS_MAX_LEVELS	32
+#define MALIBU_CPM_DVFS_LEVEL		3
+#define MALIBU_CPM_DVFS_FREQ_MHZ		GENMASK(13, 0)
+#define MALIBU_CPM_DVFS_ROW_VALID	BIT(14)
 
 #define MALIBU_MBFS_DESTINATION		0x14
 #define MALIBU_MBFS_TIMEOUT_MS		10000
@@ -101,6 +109,7 @@ struct malibu_cpm {
 	u32 response[3];
 	u32 transition_id;
 	u32 mbfs_root;
+	atomic_t display_dvfs_taken;
 	int tx_result;
 	u8 sequence;
 	u8 token;
@@ -1038,6 +1047,102 @@ static void malibu_cpm_query_display_perf(struct malibu_cpm *cpm, u32 root)
 	}
 }
 
+static bool display_dvfs;
+module_param(display_dvfs, bool, 0400);
+MODULE_PARM_DESC(display_dvfs, "Expose a one-shot Grizzly level-3 display DVFS query");
+
+static int malibu_cpm_dvfs_query(struct malibu_cpm *cpm, u32 command,
+				 unsigned long deadline, u32 *reply)
+{
+	const u32 payload[] = { command, 0, 0 };
+	unsigned long now = jiffies;
+	unsigned int timeout;
+
+	if (time_after_eq(now, deadline))
+		return -ETIME;
+	timeout = min_t(unsigned int, MALIBU_CPM_CLOCK_TIMEOUT_MS,
+		      jiffies_to_msecs(deadline - now));
+	return malibu_cpm_request(cpm, MALIBU_CPM_DVFS_DESTINATION, payload, timeout, 0, reply);
+}
+
+static ssize_t display_dvfs_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	static const char names[][8] = { "dpu", "fabdisp" };
+	struct malibu_cpm *cpm = dev_get_drvdata(dev);
+	unsigned long deadline = jiffies + msecs_to_jiffies(MALIBU_CPM_DVFS_BUDGET_MS);
+	int ids[] = { -1, -1 };
+	unsigned int count, id, j;
+	u32 reply[3], command;
+	ssize_t len = 0;
+	int ret;
+
+	if (atomic_xchg(&cpm->display_dvfs_taken, 1))
+		return -EALREADY;
+
+	ret = malibu_cpm_dvfs_query(cpm, 0x00000003, deadline, reply);
+	if (ret)
+		return sysfs_emit(buf, "count error=%d\n", ret);
+	count = reply[0] & 0xff;
+	if (!count || count > MALIBU_CPM_DVFS_MAX_DOMAINS)
+		return sysfs_emit(buf, "invalid domain-count=%u\n", count);
+
+	for (id = 0; id < count; id++) {
+		char name[8];
+		unsigned int levels;
+
+		command = 0x00000103 | (id << 16);
+		ret = malibu_cpm_dvfs_query(cpm, command, deadline, reply);
+		if (ret)
+			return sysfs_emit(buf, "descriptor id=%u error=%d\n", id, ret);
+		put_unaligned_le32(reply[1], name);
+		put_unaligned_le32(reply[2], name + 4);
+		for (j = 0; j < ARRAY_SIZE(names); j++) {
+			if (memcmp(name, names[j], sizeof(name)))
+				continue;
+			levels = reply[0] & 0xff;
+			if (ids[j] >= 0 || levels <= MALIBU_CPM_DVFS_LEVEL ||
+			    levels > MALIBU_CPM_DVFS_MAX_LEVELS)
+				return sysfs_emit(buf, "%s invalid descriptor id=%u levels=%u\n",
+						  names[j], id, levels);
+			ids[j] = id;
+		}
+	}
+
+	for (j = 0; j < ARRAY_SIZE(names); j++) {
+		u32 row;
+
+		if (ids[j] < 0) {
+			len += sysfs_emit_at(buf, len, "%s descriptor missing\n", names[j]);
+			continue;
+		}
+		command = 0x00000203 | (ids[j] << 16) | ((MALIBU_CPM_DVFS_LEVEL & ~1U) << 24);
+		ret = malibu_cpm_dvfs_query(cpm, command, deadline, reply);
+		if (ret)
+			return len + sysfs_emit_at(buf, len, "%s row error=%d\n", names[j], ret);
+
+		row = reply[1 + (MALIBU_CPM_DVFS_LEVEL & 1)];
+		if (!(row & MALIBU_CPM_DVFS_ROW_VALID)) {
+			len += sysfs_emit_at(buf, len, "%s id=%d level=%u raw=0x%08x invalid\n",
+					     names[j], ids[j], MALIBU_CPM_DVFS_LEVEL, row);
+			continue;
+		}
+		len += sysfs_emit_at(buf, len, "%s id=%d level=%u raw=0x%08x mhz=%lu\n",
+				     names[j], ids[j], MALIBU_CPM_DVFS_LEVEL, row,
+				     FIELD_GET(MALIBU_CPM_DVFS_FREQ_MHZ, row));
+	}
+	return len;
+}
+static DEVICE_ATTR_ADMIN_RO(display_dvfs);
+
+static struct attribute *malibu_cpm_dvfs_attrs[] = {
+	&dev_attr_display_dvfs.attr,
+	NULL,
+};
+
+static const struct attribute_group malibu_cpm_dvfs_group = {
+	.attrs = malibu_cpm_dvfs_attrs,
+};
+
 static int malibu_mbfs_read_vote(struct malibu_cpm *cpm, u32 handle, bool *on)
 {
 	u64 value;
@@ -1812,6 +1917,11 @@ static int malibu_cpm_probe(struct platform_device *pdev)
 	if (ret)
 		dev_warn(dev, "UFS regulator service unavailable: %pe\n", ERR_PTR(ret));
 	platform_set_drvdata(pdev, cpm);
+	if (display_dvfs && of_machine_is_compatible("google,malibu-grizzly")) {
+		ret = devm_device_add_group(dev, &malibu_cpm_dvfs_group);
+		if (ret)
+			dev_warn(dev, "could not publish display DVFS diagnostic: %d\n", ret);
+	}
 	if (cpm->trace_ufs_psm &&
 	    (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU) || malibu_ufs_idle_diag(cpm))) {
 		if (malibu_ufs_idle_diag(cpm)) {
