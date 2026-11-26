@@ -52,6 +52,7 @@
 #define MALIBU_CPM_CLOCK_TIMEOUT_MS	1000
 #define MALIBU_CPM_RESET_TIMEOUT_MS	3000
 #define MALIBU_CPM_DISPLAY_DOMAIN	0x23
+#define MALIBU_CPM_DSI0_PIXEL_CLOCK	0x01
 #define MALIBU_CPM_DISPLAY_BE_CLOCK	0x04
 #define MALIBU_CPM_DISPLAY_FE0_CLOCK	0x05
 #define MALIBU_CPM_CLOCK_GET_RATE	3
@@ -968,7 +969,7 @@ static void malibu_cpm_query_display(struct malibu_cpm *cpm)
 		const char *name;
 		u8 id;
 	} clocks[] = {
-		{ "dsi0-pixel", 0x01 },
+		{ "dsi0-pixel", MALIBU_CPM_DSI0_PIXEL_CLOCK },
 		{ "be", MALIBU_CPM_DISPLAY_BE_CLOCK },
 		{ "fe0", MALIBU_CPM_DISPLAY_FE0_CLOCK },
 	};
@@ -1302,6 +1303,10 @@ static bool display_dsi0;
 module_param(display_dsi0, bool, 0400);
 MODULE_PARM_DESC(display_dsi0, "Include a DSI0 vote cycle under Grizzly BE");
 
+static bool display_dsi0_rate;
+module_param(display_dsi0_rate, bool, 0400);
+MODULE_PARM_DESC(display_dsi0_rate, "Read the LPCM pixel rate during the Grizzly DSI0 vote cycle");
+
 static int malibu_cpm_cycle_display_dsi0(struct malibu_cpm *cpm, u32 handle)
 {
 	int ret;
@@ -1312,6 +1317,14 @@ static int malibu_cpm_cycle_display_dsi0(struct malibu_cpm *cpm, u32 handle)
 	dev_info(cpm->dev, "display-dsi0: on result=%d\n", ret);
 	if (ret)
 		return ret;
+
+	if (display_dsi0_rate) {
+		/* A mailbox transport failure can make release unsafe. */
+		ret = malibu_cpm_read_powered_display_rate(cpm, MALIBU_CPM_DSI0_PIXEL_CLOCK,
+							       "dsi0-pixel");
+		if (ret)
+			return ret;
+	}
 
 	ret = malibu_mbfs_set_vote(cpm, MALIBU_MBFS_DISPLAY_DSI0_ID, handle, false);
 	dev_info(cpm->dev, "display-dsi0: off result=%d\n", ret);
