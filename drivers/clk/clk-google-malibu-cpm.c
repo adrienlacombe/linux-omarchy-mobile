@@ -8,11 +8,13 @@
 #include <linux/completion.h>
 #include <linux/devm-helpers.h>
 #include <linux/errno.h>
+#include <linux/fs.h>
 #include <linux/iopoll.h>
 #include <linux/jiffies.h>
 #include <linux/mailbox_client.h>
 #include <linux/malibu-cpm.h>
 #include <linux/malibu-ufs-psm.h>
+#include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -24,6 +26,7 @@
 #include <linux/regulator/machine.h>
 #include <linux/reset-controller.h>
 #include <linux/spinlock.h>
+#include <linux/uaccess.h>
 #include <linux/unaligned.h>
 
 #include <dt-bindings/clock/google,malibu-cpm-io.h>
@@ -112,6 +115,7 @@ struct malibu_cpm {
 	u32 mbfs_root;
 	atomic_t display_dvfs_taken;
 	atomic_t display_wrapper_taken;
+	struct miscdevice display_wrapper_misc;
 	int tx_result;
 	u8 sequence;
 	u8 token;
@@ -1221,19 +1225,26 @@ static bool display_wrapper;
 module_param(display_wrapper, bool, 0400);
 MODULE_PARM_DESC(display_wrapper, "Expose a one-shot Grizzly DPU wrapper vote cycle");
 
-static ssize_t display_wrapper_store(struct device *dev, struct device_attribute *attr,
-				     const char *buf, size_t count)
+static ssize_t display_wrapper_write(struct file *file, const char __user *buf,
+				     size_t count, loff_t *pos)
 {
 	static const char * const children[] = {
 		"DpuBe.v", "DpuFe0.v", "DpuFe1.v", "DpuDsi0.v", "DpuDsi1.v", "DpuDp0.v",
 	};
-	struct malibu_cpm *cpm = dev_get_drvdata(dev);
+	struct malibu_cpm *cpm = container_of(file->private_data, struct malibu_cpm,
+					     display_wrapper_misc);
+	struct device *dev = cpm->dev;
+	char command[4];
 	u32 handle;
 	bool on, child_on = false;
 	unsigned int i;
 	int ret;
 
-	if (!sysfs_streq(buf, "run"))
+	if (count != sizeof(command))
+		return -EINVAL;
+	if (copy_from_user(command, buf, sizeof(command)))
+		return -EFAULT;
+	if (memcmp(command, "run\n", sizeof(command)))
 		return -EINVAL;
 	if (atomic_xchg(&cpm->display_wrapper_taken, 1))
 		return -EALREADY;
@@ -1280,16 +1291,32 @@ static ssize_t display_wrapper_store(struct device *dev, struct device_attribute
 		return ret;
 	return count;
 }
-static DEVICE_ATTR_WO(display_wrapper);
-
-static struct attribute *malibu_cpm_wrapper_attrs[] = {
-	&dev_attr_display_wrapper.attr,
-	NULL,
+static const struct file_operations display_wrapper_fops = {
+	.owner = THIS_MODULE,
+	.write = display_wrapper_write,
 };
 
-static const struct attribute_group malibu_cpm_wrapper_group = {
-	.attrs = malibu_cpm_wrapper_attrs,
-};
+static void malibu_cpm_unregister_wrapper(void *data)
+{
+	misc_deregister(data);
+}
+
+static int malibu_cpm_register_wrapper(struct malibu_cpm *cpm)
+{
+	struct miscdevice *misc = &cpm->display_wrapper_misc;
+	int ret;
+
+	misc->name = "grizzly-display-wrapper";
+	misc->minor = MISC_DYNAMIC_MINOR;
+	misc->mode = 0200;
+	misc->parent = cpm->dev;
+	misc->fops = &display_wrapper_fops;
+
+	ret = misc_register(misc);
+	if (ret)
+		return ret;
+	return devm_add_action_or_reset(cpm->dev, malibu_cpm_unregister_wrapper, misc);
+}
 
 static void malibu_mbfs_log_ufs_vote(struct malibu_cpm_domain *domain,
 				     const char *source, int ret)
@@ -2002,7 +2029,7 @@ static int malibu_cpm_probe(struct platform_device *pdev)
 		dev_warn(dev, "UFS regulator service unavailable: %pe\n", ERR_PTR(ret));
 	platform_set_drvdata(pdev, cpm);
 	if (display_wrapper && of_machine_is_compatible("google,malibu-grizzly")) {
-		ret = devm_device_add_group(dev, &malibu_cpm_wrapper_group);
+		ret = malibu_cpm_register_wrapper(cpm);
 		if (ret)
 			dev_warn(dev, "could not publish display wrapper diagnostic: %d\n", ret);
 	}
