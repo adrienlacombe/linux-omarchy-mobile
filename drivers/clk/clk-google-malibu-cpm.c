@@ -53,6 +53,7 @@
 #define MALIBU_CPM_RESET_TIMEOUT_MS	3000
 #define MALIBU_CPM_DISPLAY_DOMAIN	0x23
 #define MALIBU_CPM_DISPLAY_BE_CLOCK	0x04
+#define MALIBU_CPM_DISPLAY_FE0_CLOCK	0x05
 #define MALIBU_CPM_CLOCK_GET_RATE	3
 #define MALIBU_CPM_DVFS_DESTINATION	0x0e
 #define MALIBU_CPM_DVFS_BUDGET_MS	3000
@@ -968,7 +969,7 @@ static void malibu_cpm_query_display(struct malibu_cpm *cpm)
 	} clocks[] = {
 		{ "dsi0-pixel", 0x01 },
 		{ "be", MALIBU_CPM_DISPLAY_BE_CLOCK },
-		{ "fe0", 0x05 },
+		{ "fe0", MALIBU_CPM_DISPLAY_FE0_CLOCK },
 	};
 	unsigned int i;
 
@@ -1244,18 +1245,20 @@ static bool display_be_rate;
 module_param(display_be_rate, bool, 0400);
 MODULE_PARM_DESC(display_be_rate, "Read the LPCM BE rate during the Grizzly BE vote cycle");
 
-static int malibu_cpm_read_powered_be_rate(struct malibu_cpm *cpm)
+static int malibu_cpm_read_powered_display_rate(struct malibu_cpm *cpm, u8 clock, const char *name)
 {
 	u32 command = malibu_cpm_command(MALIBU_CPM_CLOCK_SERVICE, MALIBU_CPM_DISPLAY_DOMAIN,
-					 MALIBU_CPM_DISPLAY_BE_CLOCK, MALIBU_CPM_CLOCK_GET_RATE);
+					 clock, MALIBU_CPM_CLOCK_GET_RATE);
 	s32 reply;
 	int ret;
 
 	ret = malibu_cpm_lpcm_request(cpm, command, 0, MALIBU_CPM_CLOCK_TIMEOUT_MS, &reply);
 	if (ret)
-		dev_info(cpm->dev, "display-be-rate: command=0x%08x transport=%d\n", command, ret);
+		dev_info(cpm->dev, "display-%s-rate: command=0x%08x transport=%d\n",
+			 name, command, ret);
 	else
-		dev_info(cpm->dev, "display-be-rate: command=0x%08x reply=%d\n", command, reply);
+		dev_info(cpm->dev, "display-%s-rate: command=0x%08x reply=%d\n",
+			 name, command, reply);
 
 	return ret;
 }
@@ -1263,6 +1266,10 @@ static int malibu_cpm_read_powered_be_rate(struct malibu_cpm *cpm)
 static bool display_fe0;
 module_param(display_fe0, bool, 0400);
 MODULE_PARM_DESC(display_fe0, "Include an FE0 vote cycle under Grizzly BE");
+
+static bool display_fe0_rate;
+module_param(display_fe0_rate, bool, 0400);
+MODULE_PARM_DESC(display_fe0_rate, "Read the LPCM FE0 rate during the Grizzly FE0 vote cycle");
 
 static int malibu_cpm_cycle_display_fe0(struct malibu_cpm *cpm, u32 handle)
 {
@@ -1274,6 +1281,14 @@ static int malibu_cpm_cycle_display_fe0(struct malibu_cpm *cpm, u32 handle)
 	dev_info(cpm->dev, "display-fe0: on result=%d\n", ret);
 	if (ret)
 		return ret;
+
+	if (display_fe0_rate) {
+		/* A mailbox transport failure can make release unsafe. */
+		ret = malibu_cpm_read_powered_display_rate(cpm, MALIBU_CPM_DISPLAY_FE0_CLOCK,
+							       "fe0");
+		if (ret)
+			return ret;
+	}
 
 	ret = malibu_mbfs_set_vote(cpm, MALIBU_MBFS_DISPLAY_FE0_ID, handle, false);
 	dev_info(cpm->dev, "display-fe0: off result=%d\n", ret);
@@ -1293,7 +1308,7 @@ static int malibu_cpm_cycle_display_be(struct malibu_cpm *cpm, u32 handle, u32 f
 
 	if (display_be_rate) {
 		/* A mailbox transport failure can make release unsafe. */
-		ret = malibu_cpm_read_powered_be_rate(cpm);
+		ret = malibu_cpm_read_powered_display_rate(cpm, MALIBU_CPM_DISPLAY_BE_CLOCK, "be");
 		if (ret)
 			return ret;
 	}
