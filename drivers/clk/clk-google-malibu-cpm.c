@@ -47,6 +47,8 @@
 #define MALIBU_CPM_LSIOE_DOMAIN		5
 #define MALIBU_CPM_CLOCK_TIMEOUT_MS	1000
 #define MALIBU_CPM_RESET_TIMEOUT_MS	3000
+#define MALIBU_CPM_DISPLAY_DOMAIN	0x23
+#define MALIBU_CPM_CLOCK_GET_RATE	3
 
 #define MALIBU_MBFS_DESTINATION		0x14
 #define MALIBU_MBFS_TIMEOUT_MS		10000
@@ -932,6 +934,58 @@ static int malibu_mbfs_root(struct malibu_cpm *cpm, u32 *root)
 	return 0;
 }
 
+static bool display_query;
+module_param(display_query, bool, 0400);
+MODULE_PARM_DESC(display_query, "Log Grizzly display MBFS handles and CPM clock rates");
+
+static void malibu_cpm_query_display(struct malibu_cpm *cpm)
+{
+	static const char * const domains[] = {
+		"dpu.v", "DpuBe.v", "DpuFe0.v", "DpuDsi0.v",
+	};
+	static const struct {
+		const char *name;
+		u8 id;
+	} clocks[] = {
+		{ "dsi0-pixel", 0x01 },
+		{ "be", 0x04 },
+		{ "fe0", 0x05 },
+	};
+	unsigned int i;
+
+	dev_info(cpm->dev, "display-cpm: read-only queries start\n");
+	for (i = 0; i < ARRAY_SIZE(domains); i++) {
+		u32 handle;
+		int ret;
+
+		ret = malibu_mbfs_lookup(cpm, cpm->mbfs_root, domains[i], &handle);
+		if (ret)
+			dev_info(cpm->dev, "display-cpm: MBFS %s error=%d\n",
+				 domains[i], ret);
+		else
+			dev_info(cpm->dev, "display-cpm: MBFS %s handle=0x%x\n",
+				 domains[i], handle);
+	}
+	for (i = 0; i < ARRAY_SIZE(clocks); i++) {
+		u32 command = malibu_cpm_command(MALIBU_CPM_CLOCK_SERVICE,
+						 MALIBU_CPM_DISPLAY_DOMAIN,
+						 clocks[i].id,
+						 MALIBU_CPM_CLOCK_GET_RATE);
+		s32 reply;
+		int ret;
+
+		ret = malibu_cpm_lpcm_request(cpm, command, 0,
+					      MALIBU_CPM_CLOCK_TIMEOUT_MS, &reply);
+		if (ret)
+			dev_info(cpm->dev, "display-cpm: %s command=0x%08x transport=%d\n",
+				 clocks[i].name, command, ret);
+		else
+			dev_info(cpm->dev, "display-cpm: %s command=0x%08x reply=%d\n",
+				 clocks[i].name, command, reply);
+	}
+	dev_info(cpm->dev, "display-cpm: read-only queries complete\n");
+}
+
 static int malibu_mbfs_read_vote(struct malibu_cpm *cpm, u32 handle, bool *on)
 {
 	const u32 payload[] = { MALIBU_MBFS_READ | handle, 0, 0 };
@@ -1445,9 +1499,13 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 	if (ret)
 		return ret;
 	ret = of_genpd_add_provider_onecell(provider->node, &provider->onecell);
-	if (!ret)
-		provider->published = true;
-	return ret;
+	if (ret)
+		return ret;
+
+	provider->published = true;
+	if (display_query && of_machine_is_compatible("google,malibu-grizzly"))
+		malibu_cpm_query_display(cpm);
+	return 0;
 }
 
 static int malibu_cpm_register_clocks(struct malibu_cpm *cpm)
