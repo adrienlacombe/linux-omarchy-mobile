@@ -1004,7 +1004,8 @@ static int malibu_mbfs_read_value(struct malibu_cpm *cpm, u32 handle, u64 *value
 
 static void malibu_cpm_query_display_perf(struct malibu_cpm *cpm, u32 root)
 {
-	static const char * const path[] = { "cpm", "perf", "domains" };
+	/* Stock paths name the CPM backend before the firmware components. */
+	static const char * const path[] = { "perf", "domains" };
 	static const char * const domains[] = { "dpu", "fabdisp" };
 	unsigned int i;
 	int ret;
