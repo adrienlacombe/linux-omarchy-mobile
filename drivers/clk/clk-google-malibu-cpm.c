@@ -72,6 +72,7 @@
 #define MALIBU_MBFS_NAME_SIZE		16
 #define MALIBU_MBFS_DOMAIN_COUNT	(MALIBU_CPM_PD_UFS + 1)
 #define MALIBU_MBFS_NO_PARENT		-1
+#define MALIBU_MBFS_DISPLAY_WRAPPER_ID	0x08
 #define MALIBU_MBFS_HSIOS_ID		0x1a
 #define MALIBU_MBFS_UFS_PREP_ID		0x222
 #define MALIBU_MBFS_UFS_CORE_ID		0x220
@@ -110,6 +111,7 @@ struct malibu_cpm {
 	u32 transition_id;
 	u32 mbfs_root;
 	atomic_t display_dvfs_taken;
+	atomic_t display_wrapper_taken;
 	int tx_result;
 	u8 sequence;
 	u8 token;
@@ -1162,11 +1164,10 @@ static int malibu_mbfs_read_domain(struct malibu_cpm_domain *domain, bool *on)
 	return malibu_mbfs_read_vote(domain->cpm, domain->handle, on);
 }
 
-static int malibu_mbfs_set_domain(struct malibu_cpm_domain *domain, bool on)
+static int malibu_mbfs_set_vote(struct malibu_cpm *cpm, u32 id, u32 handle, bool on)
 {
 	unsigned long timeout = msecs_to_jiffies(MALIBU_MBFS_TRANSITION_MS);
-	struct malibu_cpm *cpm = domain->cpm;
-	const u32 payload[] = { MALIBU_MBFS_WRITE | domain->handle, on, 0 };
+	const u32 payload[] = { MALIBU_MBFS_WRITE | handle, on, 0 };
 	u32 reply[3], status;
 	bool actual;
 	int ret;
@@ -1178,9 +1179,11 @@ static int malibu_mbfs_set_domain(struct malibu_cpm_domain *domain, bool on)
 		return -EPROTO;
 
 	ret = malibu_cpm_request(cpm, MALIBU_MBFS_DESTINATION, payload,
-				 MALIBU_MBFS_TIMEOUT_MS, domain->id, reply);
+				 MALIBU_MBFS_TIMEOUT_MS, id, reply);
 	if (!ret) {
 		status = FIELD_GET(MALIBU_MBFS_STATUS, reply[0]);
+		if (id == MALIBU_MBFS_DISPLAY_WRAPPER_ID)
+			dev_info(cpm->dev, "display-wrapper: requested=%u ack=%u\n", on, status);
 		if (status == MALIBU_MBFS_DEFERRED) {
 			if (!wait_for_completion_timeout(&cpm->transition_done, timeout))
 				ret = -ETIMEDOUT;
@@ -1199,13 +1202,94 @@ static int malibu_mbfs_set_domain(struct malibu_cpm_domain *domain, bool on)
 		return ret;
 
 	/* A notification carries a resource ID without a transaction token. */
-	ret = malibu_mbfs_read_domain(domain, &actual);
+	ret = malibu_mbfs_read_vote(cpm, handle, &actual);
+	if (!ret && id == MALIBU_MBFS_DISPLAY_WRAPPER_ID)
+		dev_info(cpm->dev, "display-wrapper: requested=%u readback=%u\n", on, actual);
 	if (!ret && actual != on)
 		ret = -EIO;
 	if (ret)
 		cpm->transition_stalled = true;
 	return ret;
 }
+
+static int malibu_mbfs_set_domain(struct malibu_cpm_domain *domain, bool on)
+{
+	return malibu_mbfs_set_vote(domain->cpm, domain->id, domain->handle, on);
+}
+
+static bool display_wrapper;
+module_param(display_wrapper, bool, 0400);
+MODULE_PARM_DESC(display_wrapper, "Expose a one-shot Grizzly DPU wrapper vote cycle");
+
+static ssize_t display_wrapper_store(struct device *dev, struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	static const char * const children[] = {
+		"DpuBe.v", "DpuFe0.v", "DpuFe1.v", "DpuDsi0.v", "DpuDsi1.v", "DpuDp0.v",
+	};
+	struct malibu_cpm *cpm = dev_get_drvdata(dev);
+	u32 handle;
+	bool on, child_on = false;
+	unsigned int i;
+	int ret;
+
+	if (!sysfs_streq(buf, "run"))
+		return -EINVAL;
+	if (atomic_xchg(&cpm->display_wrapper_taken, 1))
+		return -EALREADY;
+
+	ret = malibu_mbfs_lookup(cpm, cpm->mbfs_root, "dpu.v", &handle);
+	if (ret) {
+		dev_info(dev, "display-wrapper: lookup error=%d\n", ret);
+		return ret;
+	}
+	ret = malibu_mbfs_read_vote(cpm, handle, &on);
+	if (ret) {
+		dev_info(dev, "display-wrapper: initial read error=%d\n", ret);
+		return ret;
+	}
+	dev_info(dev, "display-wrapper: dpu.v handle=0x%x initial-vote=%u\n", handle, on);
+	for (i = 0; i < ARRAY_SIZE(children); i++) {
+		u32 child;
+		bool voted;
+
+		ret = malibu_mbfs_lookup(cpm, cpm->mbfs_root, children[i], &child);
+		if (!ret)
+			ret = malibu_mbfs_read_vote(cpm, child, &voted);
+		if (ret) {
+			dev_info(dev, "display-wrapper: %s initial sample error=%d\n",
+				 children[i], ret);
+			return ret;
+		}
+		dev_info(dev, "display-wrapper: %s initial-vote=%u\n", children[i], voted);
+		child_on |= voted;
+	}
+	if (on || child_on) {
+		dev_info(dev, "display-wrapper: inherited votes left in place\n");
+		return count;
+	}
+
+	ret = malibu_mbfs_set_vote(cpm, MALIBU_MBFS_DISPLAY_WRAPPER_ID, handle, true);
+	dev_info(dev, "display-wrapper: on result=%d\n", ret);
+	if (ret)
+		return ret;
+
+	ret = malibu_mbfs_set_vote(cpm, MALIBU_MBFS_DISPLAY_WRAPPER_ID, handle, false);
+	dev_info(dev, "display-wrapper: off result=%d\n", ret);
+	if (ret)
+		return ret;
+	return count;
+}
+static DEVICE_ATTR_WO(display_wrapper);
+
+static struct attribute *malibu_cpm_wrapper_attrs[] = {
+	&dev_attr_display_wrapper.attr,
+	NULL,
+};
+
+static const struct attribute_group malibu_cpm_wrapper_group = {
+	.attrs = malibu_cpm_wrapper_attrs,
+};
 
 static void malibu_mbfs_log_ufs_vote(struct malibu_cpm_domain *domain,
 				     const char *source, int ret)
@@ -1917,6 +2001,11 @@ static int malibu_cpm_probe(struct platform_device *pdev)
 	if (ret)
 		dev_warn(dev, "UFS regulator service unavailable: %pe\n", ERR_PTR(ret));
 	platform_set_drvdata(pdev, cpm);
+	if (display_wrapper && of_machine_is_compatible("google,malibu-grizzly")) {
+		ret = devm_device_add_group(dev, &malibu_cpm_wrapper_group);
+		if (ret)
+			dev_warn(dev, "could not publish display wrapper diagnostic: %d\n", ret);
+	}
 	if (display_dvfs && of_machine_is_compatible("google,malibu-grizzly")) {
 		ret = devm_device_add_group(dev, &malibu_cpm_dvfs_group);
 		if (ret)
