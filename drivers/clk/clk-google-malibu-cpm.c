@@ -1307,6 +1307,10 @@ static bool display_dsi0_rate;
 module_param(display_dsi0_rate, bool, 0400);
 MODULE_PARM_DESC(display_dsi0_rate, "Read the LPCM pixel rate during the Grizzly DSI0 vote cycle");
 
+static bool display_dsi0_host;
+module_param(display_dsi0_host, bool, 0400);
+MODULE_PARM_DESC(display_dsi0_host, "Log Grizzly DSI0 host access prerequisites");
+
 static int malibu_cpm_cycle_display_dsi0(struct malibu_cpm *cpm, u32 handle)
 {
 	int ret;
@@ -1318,12 +1322,17 @@ static int malibu_cpm_cycle_display_dsi0(struct malibu_cpm *cpm, u32 handle)
 	if (ret)
 		return ret;
 
-	if (display_dsi0_rate) {
+	if (display_dsi0_rate || display_dsi0_host) {
 		/* A mailbox transport failure can make release unsafe. */
 		ret = malibu_cpm_read_powered_display_rate(cpm, MALIBU_CPM_DSI0_PIXEL_CLOCK,
 							       "dsi0-pixel");
 		if (ret)
 			return ret;
+	}
+	if (display_dsi0_host) {
+		/* A powered pixel rate does not establish APB clock or reset state. */
+		dev_info(cpm->dev,
+			 "display-dsi0-host: status skipped, APB clock and reset unverified\n");
 	}
 
 	ret = malibu_mbfs_set_vote(cpm, MALIBU_MBFS_DISPLAY_DSI0_ID, handle, false);
