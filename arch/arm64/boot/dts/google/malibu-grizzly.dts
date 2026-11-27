@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
 /dts-v1/;
 
+#include <dt-bindings/clock/google,malibu-cpm-io.h>
+
 #include "malibu.dtsi"
 
 / {
@@ -14,6 +16,24 @@
 
 	chosen {
 		bootargs = "rdinit=/init panic=10 arm_si_l1_workaround_4311569";
+	};
+
+	dsi0_pllref: clock-dsi0-pllref {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <38400000>;
+	};
+
+	dsi0_phy: phy@f7c0000 {
+		compatible = "google,malibu-dsi-cdphy";
+		reg = <0x0 0x0f7c0000 0x0 0x18000>,
+		      <0x0 0x0f7d8800 0x0 0x800>;
+		reg-names = "cdphy-tx", "apb";
+		clocks = <&dsi0_pllref>;
+		clock-names = "pllref";
+		power-domains = <&cpm MALIBU_CPM_PD_DSI0>;
+		#phy-cells = <0>;
+		status = "disabled";
 	};
 
 	/* Bootstrap range from the factory DT, before bootloader fixups. */
