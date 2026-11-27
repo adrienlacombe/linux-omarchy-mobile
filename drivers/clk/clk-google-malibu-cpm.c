@@ -1729,11 +1729,44 @@ out:
 	return ret;
 }
 
+static bool display_dsi0_siblings;
+module_param(display_dsi0_siblings, bool, 0400);
+MODULE_PARM_DESC(display_dsi0_siblings, "Check Grizzly DSI0 sibling MBFS votes");
+
+static bool malibu_mbfs_trace_dsi0_siblings(const struct malibu_cpm_domain *domain)
+{
+	return display_dsi0_siblings && domain->id == MALIBU_MBFS_DISPLAY_DSI0_ID;
+}
+
+static int malibu_mbfs_sample_dsi0_siblings(struct malibu_cpm *cpm, const char *phase)
+{
+	static const char * const names[] = { "DpuDsi1.v", "DpuFe0.v", "DpuFe1.v" };
+	int votes[ARRAY_SIZE(names)];
+	int result = 0;
+	u32 handle;
+	bool on;
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(names); i++) {
+		ret = malibu_mbfs_lookup(cpm, cpm->mbfs_root, names[i], &handle);
+		if (!ret)
+			ret = malibu_mbfs_read_vote(cpm, handle, &on);
+		votes[i] = ret ? ret : on;
+		if (!result && votes[i])
+			result = ret ? ret : -EBUSY;
+	}
+
+	dev_info(cpm->dev, "display-dsi0-siblings: %s dsi1=%d fe0=%d fe1=%d\n",
+		 phase, votes[0], votes[1], votes[2]);
+	return result;
+}
+
 static int malibu_mbfs_power_on(struct generic_pm_domain *genpd)
 {
 	struct malibu_cpm_domain *domain = container_of(genpd, struct malibu_cpm_domain, genpd);
 	struct malibu_cpm *cpm = domain->cpm;
 	struct malibu_ufs_psm_sample before, after;
+	bool trace_siblings = malibu_mbfs_trace_dsi0_siblings(domain);
 	bool trace_hsios = domain->id == MALIBU_MBFS_HSIOS_ID && cpm->trace_ufs_psm;
 	const char *source;
 	int ret;
@@ -1747,7 +1780,14 @@ static int malibu_mbfs_power_on(struct generic_pm_domain *genpd)
 
 	if (trace_hsios)
 		malibu_ufs_sample_psms(&cpm->ufs_psm, &before);
+	if (trace_siblings) {
+		ret = malibu_mbfs_sample_dsi0_siblings(cpm, "before-on");
+		if (ret)
+			return ret;
+	}
 	ret = malibu_mbfs_lazy_on(domain, &source);
+	if (trace_siblings && !ret && domain->powered_here)
+		malibu_mbfs_sample_dsi0_siblings(cpm, "after-on");
 	if (trace_hsios) {
 		if (!ret)
 			malibu_ufs_sample_psms(&cpm->ufs_psm, &after);
@@ -1797,6 +1837,7 @@ static int malibu_mbfs_initial_ufs_vote(struct malibu_cpm_domain *domain)
 static int malibu_mbfs_power_off(struct generic_pm_domain *genpd)
 {
 	struct malibu_cpm_domain *domain = container_of(genpd, struct malibu_cpm_domain, genpd);
+	bool trace_siblings = malibu_mbfs_trace_dsi0_siblings(domain);
 	int ret;
 
 	if (malibu_ufs_idle_diag(domain->cpm) &&
@@ -1806,7 +1847,12 @@ static int malibu_mbfs_power_off(struct generic_pm_domain *genpd)
 	if (domain->lazy && !domain->powered_here)
 		return 0;
 
+	/* Observation failures must never prevent releasing an owned vote. */
+	if (trace_siblings)
+		malibu_mbfs_sample_dsi0_siblings(domain->cpm, "before-off");
 	ret = malibu_mbfs_set_domain(domain, false);
+	if (trace_siblings && !ret)
+		malibu_mbfs_sample_dsi0_siblings(domain->cpm, "after-off");
 	if (!ret)
 		domain->powered_here = false;
 	return ret;
