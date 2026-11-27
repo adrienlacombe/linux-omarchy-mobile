@@ -53,8 +53,10 @@
 #define MALIBU_CPM_RESET_TIMEOUT_MS	3000
 #define MALIBU_CPM_DISPLAY_DOMAIN	0x23
 #define MALIBU_CPM_DSI0_PIXEL_CLOCK	0x01
+#define MALIBU_CPM_DSI_PHY_CLOCK	0x03
 #define MALIBU_CPM_DISPLAY_BE_CLOCK	0x04
 #define MALIBU_CPM_DISPLAY_FE0_CLOCK	0x05
+#define MALIBU_CPM_CLOCK_GET_STATUS	2
 #define MALIBU_CPM_CLOCK_GET_RATE	3
 #define MALIBU_CPM_DVFS_DESTINATION	0x0e
 #define MALIBU_CPM_DVFS_BUDGET_MS	3000
@@ -749,7 +751,7 @@ int malibu_cpm_ufs_refclk_sample(struct device *supplier, enum malibu_cpm_ufs_re
 
 	/* D1 clock op 2 compares the selected status bits with the request mask. */
 	command = malibu_cpm_command(MALIBU_CPM_CLOCK_SERVICE, MALIBU_CPM_HSIOS_DOMAIN,
-				     queries[sample].selector, 2);
+				     queries[sample].selector, MALIBU_CPM_CLOCK_GET_STATUS);
 	ret = malibu_cpm_lpcm_request(cpm, command, queries[sample].mask,
 				     MALIBU_CPM_CLOCK_TIMEOUT_MS, &reply);
 	if (ret) {
@@ -1733,6 +1735,26 @@ static bool display_dsi0_siblings;
 module_param(display_dsi0_siblings, bool, 0400);
 MODULE_PARM_DESC(display_dsi0_siblings, "Check Grizzly DSI0 sibling MBFS votes");
 
+static bool display_dsi0_selector3_gate;
+module_param(display_dsi0_selector3_gate, bool, 0400);
+MODULE_PARM_DESC(display_dsi0_selector3_gate, "Sample DPU LPCM selector 3 gate with sibling checks");
+
+static void malibu_cpm_sample_dsi_phy_gate(struct malibu_cpm *cpm, const char *phase)
+{
+	u32 command = malibu_cpm_command(MALIBU_CPM_CLOCK_SERVICE,
+					 MALIBU_CPM_DISPLAY_DOMAIN, MALIBU_CPM_DSI_PHY_CLOCK,
+					 MALIBU_CPM_CLOCK_GET_STATUS);
+	s32 reply;
+	int ret;
+
+	/* D1 status op 2 with bit 0 set compares this cell's gate acknowledgment. */
+	ret = malibu_cpm_lpcm_request(cpm, command, BIT(0), MALIBU_CPM_CLOCK_TIMEOUT_MS, &reply);
+	if (ret)
+		dev_info(cpm->dev, "display-dsi0-selector3-gate: %s transport=%d\n", phase, ret);
+	else
+		dev_info(cpm->dev, "display-dsi0-selector3-gate: %s firmware=%d\n", phase, reply);
+}
+
 static bool malibu_mbfs_trace_dsi0_siblings(const struct malibu_cpm_domain *domain)
 {
 	return display_dsi0_siblings && domain->id == MALIBU_MBFS_DISPLAY_DSI0_ID;
@@ -1758,6 +1780,10 @@ static int malibu_mbfs_sample_dsi0_siblings(struct malibu_cpm *cpm, const char *
 
 	dev_info(cpm->dev, "display-dsi0-siblings: %s dsi1=%d fe0=%d fe1=%d\n",
 		 phase, votes[0], votes[1], votes[2]);
+
+	/* Gate diagnostics must not interfere with releasing votes we own. */
+	if (display_dsi0_selector3_gate && !result)
+		malibu_cpm_sample_dsi_phy_gate(cpm, phase);
 	return result;
 }
 
