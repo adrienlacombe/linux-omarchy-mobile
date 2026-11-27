@@ -11,7 +11,8 @@ maintainers:
 
 description: |
   CPM controls the clocks and resets for the HSION USB2, LSIOE I2C3
-  and HSIOS UFS controllers and their power domain hierarchies. The host uses
+  and HSIOS UFS controllers and their power domain hierarchies. It also controls
+  the Grizzly display power domain hierarchy. The host uses
   separate MBA v3 queues for requests and replies. Clock, reset and
   power domain indices are defined in google,malibu-cpm-io.h.
 
@@ -43,7 +44,10 @@ properties:
       a child of USB top. Domain 3 is LSIOE and domain 4 is its client
       domain for I2C3. Domain 5 is HSIOS, domain 6 is the UFS preparation
       domain, and domain 7 is the UFS core. UFS preparation is a child of
-      HSIOS and UFS core is a child of UFS preparation.
+      HSIOS and UFS core is a child of UFS preparation. On Grizzly, domain
+      8 is the DPU wrapper, domain 9 is its back end, and domain 10 is
+      DSI0. The back end is a child of the wrapper and DSI0 is a child of
+      the back end.
 
   regulators:
     type: object

@@ -30,5 +30,8 @@
 #define MALIBU_CPM_PD_HSIOS		5
 #define MALIBU_CPM_PD_UFS_PREP		6
 #define MALIBU_CPM_PD_UFS		7
+#define MALIBU_CPM_PD_DPU_WRAPPER	8
+#define MALIBU_CPM_PD_DPU_BE		9
+#define MALIBU_CPM_PD_DSI0		10
 
 #endif
