@@ -91,6 +91,16 @@ config PHY_ECONET_PCIE
 	  callback for PCIe GEN1 and GEN2 ports. This PHY is found on
 	  EcoNet SoCs including EN751221 and EN7528.
 
+config PHY_GOOGLE_MALIBU_CDPHY
+	tristate "Google Malibu display C/D-PHY scaffold"
+	depends on OF && (ARM64 || COMPILE_TEST)
+	select GENERIC_PHY
+	help
+	  Register the DSI0 PHY provider on Google Malibu.
+	  This bring-up scaffold does not program hardware or enable DSI output.
+	  PHY initialization and power-on fail until those operations are implemented.
+	  To build the provider as a module, choose M here.
+
 config PHY_GOOGLE_USB
 	tristate "Google Tensor SoC USB PHY driver"
 	select GENERIC_PHY

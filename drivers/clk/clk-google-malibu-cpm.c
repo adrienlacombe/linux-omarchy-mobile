@@ -76,7 +76,7 @@
 #define MALIBU_MBFS_READ			0x70000000
 #define MALIBU_MBFS_WRITE		0x80000000
 #define MALIBU_MBFS_NAME_SIZE		16
-#define MALIBU_MBFS_DOMAIN_COUNT	(MALIBU_CPM_PD_UFS + 1)
+#define MALIBU_MBFS_DOMAIN_COUNT	(MALIBU_CPM_PD_DSI0 + 1)
 #define MALIBU_MBFS_NO_PARENT		-1
 #define MALIBU_MBFS_DISPLAY_WRAPPER_ID	0x08
 #define MALIBU_MBFS_DISPLAY_BE_ID	0x200
@@ -1859,9 +1859,23 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 			MALIBU_MBFS_UFS_CORE_NAME, MALIBU_MBFS_UFS_CORE_ID, MALIBU_CPM_PD_UFS_PREP,
 			.lazy = true,
 		},
+		[MALIBU_CPM_PD_DPU_WRAPPER] = {
+			"dpu.v", MALIBU_MBFS_DISPLAY_WRAPPER_ID, MALIBU_MBFS_NO_PARENT,
+			.lazy = true,
+		},
+		[MALIBU_CPM_PD_DPU_BE] = {
+			"DpuBe.v", MALIBU_MBFS_DISPLAY_BE_ID, MALIBU_CPM_PD_DPU_WRAPPER,
+			.lazy = true,
+		},
+		[MALIBU_CPM_PD_DSI0] = {
+			"DpuDsi0.v", MALIBU_MBFS_DISPLAY_DSI0_ID, MALIBU_CPM_PD_DPU_BE,
+			.lazy = true,
+		},
 	};
 	struct device *dev = cpm->dev;
 	struct malibu_cpm_domains *provider;
+	bool display_domains = of_machine_is_compatible("google,malibu-grizzly") &&
+			       !display_wrapper;
 	bool initial_ufs_votes = IS_ENABLED(CONFIG_COMMON_CLK_GOOGLE_MALIBU_CPM_UFS_VOTE_DIAG) &&
 				 cpm->trace_ufs_psm &&
 				 (!IS_ENABLED(CONFIG_SCSI_UFS_MALIBU) || malibu_ufs_idle_diag(cpm));
@@ -1882,7 +1896,8 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 	ret = malibu_mbfs_root(cpm, &cpm->mbfs_root, &namespace_root);
 	if (ret)
 		return ret;
-	for (i = 0; i < ARRAY_SIZE(domains); i++) {
+	/* The manual vote diagnostic and genpd must not own the same votes. */
+	for (i = 0; i < (display_domains ? ARRAY_SIZE(domains) : MALIBU_CPM_PD_DPU_WRAPPER); i++) {
 		struct malibu_cpm_domain *domain = &provider->domain[i];
 		int parent = domains[i].parent;
 
@@ -1942,7 +1957,7 @@ static int malibu_cpm_register_domains(struct malibu_cpm *cpm)
 			return ret;
 	}
 	provider->onecell.domains = provider->genpds;
-	provider->onecell.num_domains = ARRAY_SIZE(domains);
+	provider->onecell.num_domains = i;
 	provider->node = dev->of_node;
 	ret = devm_add_action_or_reset(dev, malibu_cpm_remove_domains_provider, provider);
 	if (ret)
