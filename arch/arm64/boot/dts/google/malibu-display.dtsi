@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+
+#include <dt-bindings/clock/google,malibu-cpm-io.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+
+/ {
+	dpu_sgia: interrupt-controller@f46e080 {
+		compatible = "google,malibu-level-sgia";
+		reg = <0x0 0x0f46e080 0x0 0x20>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		#address-cells = <0>;
+		interrupts = <GIC_SPI 0xe5 IRQ_TYPE_LEVEL_HIGH 0>;
+		power-domains = <&cpm MALIBU_CPM_PD_DPU_WRAPPER>;
+		status = "disabled";
+	};
+
+	dpu_be_sgia: interrupt-controller@f46e020 {
+		compatible = "google,malibu-level-sgia";
+		reg = <0x0 0x0f46e020 0x0 0x20>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		#address-cells = <0>;
+		interrupt-parent = <&dpu_sgia>;
+		interrupts = <0>;
+		power-domains = <&cpm MALIBU_CPM_PD_DPU_WRAPPER>;
+		status = "disabled";
+	};
+
+	dc9x00: display-controller@f600000 {
+		compatible = "google,malibu-dc9x00";
+		reg = <0x0 0x0f600000 0x0 0x11f000>;
+		interrupt-parent = <&dpu_be_sgia>;
+		interrupts = <4>;
+		interrupt-names = "frame-start";
+		power-domains = <&cpm MALIBU_CPM_PD_DPU_BE>;
+		status = "disabled";
+	};
+};

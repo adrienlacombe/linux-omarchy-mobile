@@ -351,5 +351,6 @@
 	};
 };
 
+#include "malibu-display.dtsi"
 #include "malibu-usb2.dtsi"
 #include "malibu-ufs.dtsi"
