@@ -1521,17 +1521,23 @@ static bool malibu_mbfs_trace_be_gate(const struct malibu_cpm_domain *domain)
 	return display_be_selector4_gate && domain->id == MALIBU_MBFS_DISPLAY_BE_ID;
 }
 
-static int malibu_cpm_sample_display_gate(struct malibu_cpm *cpm, u8 selector,
-					  const char *name, const char *phase)
+static int malibu_cpm_read_display_gate(struct malibu_cpm *cpm, u8 selector, s32 *reply)
 {
 	u32 command = malibu_cpm_command(MALIBU_CPM_CLOCK_SERVICE,
 					 MALIBU_CPM_DISPLAY_DOMAIN, selector,
 					 MALIBU_CPM_CLOCK_GET_STATUS);
+
+	/* D1 status op 2 with bit 0 set compares this cell's gate acknowledgment. */
+	return malibu_cpm_lpcm_request(cpm, command, BIT(0), MALIBU_CPM_CLOCK_TIMEOUT_MS, reply);
+}
+
+static int malibu_cpm_sample_display_gate(struct malibu_cpm *cpm, u8 selector,
+					  const char *name, const char *phase)
+{
 	s32 reply;
 	int ret;
 
-	/* D1 status op 2 with bit 0 set compares this cell's gate acknowledgment. */
-	ret = malibu_cpm_lpcm_request(cpm, command, BIT(0), MALIBU_CPM_CLOCK_TIMEOUT_MS, &reply);
+	ret = malibu_cpm_read_display_gate(cpm, selector, &reply);
 	if (ret)
 		dev_info(cpm->dev, "%s: %s transport=%d\n", name, phase, ret);
 	else
@@ -1544,6 +1550,54 @@ static int malibu_cpm_sample_be_gate(struct malibu_cpm *cpm, const char *phase)
 	return malibu_cpm_sample_display_gate(cpm, MALIBU_CPM_DISPLAY_BE_CLOCK,
 					      "display-be-selector4-gate", phase);
 }
+
+int malibu_cpm_check_be_csr(struct device *supplier)
+{
+	static const struct {
+		const char *name;
+		bool expected;
+	} votes[] = {
+		{ "dpu.v", true }, { "DpuBe.v", true },
+		{ "DpuFe0.v", false }, { "DpuFe1.v", false },
+		{ "DpuDsi0.v", false }, { "DpuDsi1.v", false },
+		{ "DpuDp0.v", false },
+	};
+	struct malibu_cpm *cpm;
+	unsigned int i;
+	s32 gate;
+	int ret;
+
+	if (!display_be_selector4_gate || display_wrapper ||
+	    !of_machine_is_compatible("google,malibu-grizzly") ||
+	    !of_device_is_compatible(supplier->of_node, "google,malibu-cpm-io"))
+		return -EOPNOTSUPP;
+
+	guard(device)(supplier);
+	cpm = dev_get_drvdata(supplier);
+	if (!cpm || !cpm->mbfs_root)
+		return -ENODEV;
+
+	for (i = 0; i < ARRAY_SIZE(votes); i++) {
+		u32 handle;
+		bool on;
+
+		ret = malibu_mbfs_lookup(cpm, cpm->mbfs_root, votes[i].name, &handle);
+		if (!ret)
+			ret = malibu_mbfs_read_vote(cpm, handle, &on);
+		if (ret)
+			return ret;
+		dev_info(supplier, "display-be-csr: %s AP vote=%u\n", votes[i].name, on);
+		if (on != votes[i].expected)
+			return -EBUSY;
+	}
+
+	ret = malibu_cpm_read_display_gate(cpm, MALIBU_CPM_DISPLAY_BE_CLOCK, &gate);
+	if (ret)
+		return ret;
+	dev_info(supplier, "display-be-csr: powered selector 4 gate=%d\n", gate);
+	return gate == 1 ? 0 : -EIO;
+}
+EXPORT_SYMBOL_GPL(malibu_cpm_check_be_csr);
 
 static int malibu_mbfs_lazy_on(struct malibu_cpm_domain *domain, const char **source)
 {

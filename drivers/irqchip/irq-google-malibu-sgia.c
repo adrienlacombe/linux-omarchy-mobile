@@ -61,11 +61,30 @@ static void malibu_sgia_eoi(struct irq_data *data)
 	/* Level interrupts are cleared at their source. Pulses are cleared on entry. */
 }
 
+static int malibu_sgia_get_state(struct irq_data *data,
+				enum irqchip_irq_state which, bool *state)
+{
+	struct malibu_sgia *sgia = irq_data_get_irq_chip_data(data);
+	unsigned long flags;
+	u32 enabled;
+
+	if (which != IRQCHIP_STATE_MASKED)
+		return -EINVAL;
+
+	/* The SGIA holds its runtime PM reference for its IRQ domain's lifetime. */
+	raw_spin_lock_irqsave(&sgia->lock, flags);
+	enabled = readl(sgia->base + MALIBU_SGIA_ENABLE) | sgia->enabled;
+	raw_spin_unlock_irqrestore(&sgia->lock, flags);
+	*state = !(enabled & BIT(data->hwirq));
+	return 0;
+}
+
 static struct irq_chip malibu_sgia_chip = {
 	.name = "malibu-sgia",
 	.irq_mask = malibu_sgia_mask,
 	.irq_unmask = malibu_sgia_unmask,
 	.irq_eoi = malibu_sgia_eoi,
+	.irq_get_irqchip_state = malibu_sgia_get_state,
 	.flags = IRQCHIP_MASK_ON_SUSPEND,
 };
 
