@@ -11180,6 +11180,7 @@ F:	Documentation/devicetree/bindings/clock/google,gs201-clock.yaml
 F:	Documentation/devicetree/bindings/clock/google,malibu-cpm-io.yaml
 F:	Documentation/devicetree/bindings/clock/google,zuma-clock.yaml
 F:	Documentation/devicetree/bindings/clock/google,zumapro*
+F:	Documentation/devicetree/bindings/display/google,malibu-dc9x00.yaml
 F:	Documentation/devicetree/bindings/gpio/google,malibu-aoss-alert-gpio.yaml
 F:	Documentation/devicetree/bindings/interrupt-controller/google,malibu-sgia.yaml
 F:	Documentation/devicetree/bindings/mailbox/google,malibu-mba-v3-queue.yaml
@@ -11208,6 +11209,7 @@ F:	drivers/clk/samsung/clk-gs201.c
 F:	drivers/clk/samsung/clk-zuma.c
 F:	drivers/clk/samsung/clk-zumapro.c
 F:	drivers/gpio/gpio-google-malibu-aoss-alert.c
+F:	drivers/gpu/drm/google/malibu-dc9x00.c
 F:	drivers/irqchip/irq-google-malibu-sgia.c
 F:	drivers/mailbox/google-malibu-mba.c
 F:	drivers/phy/phy-google-malibu-cdphy.c

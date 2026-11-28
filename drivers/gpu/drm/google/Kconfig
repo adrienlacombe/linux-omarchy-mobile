@@ -42,3 +42,13 @@ config DRM_GS_DECON
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called gs-decon.
+
+config DRM_GOOGLE_MALIBU_DC9X00
+	tristate "Google Malibu DC9x00 frame-start IRQ scaffold"
+	depends on DRM && OF && (ARM64 || COMPILE_TEST)
+	help
+	  Reserve the output-0 frame-start IRQ on Google Malibu for display
+	  bring-up. The IRQ remains masked until the controller can safely
+	  check and acknowledge the source. The driver does not enable scanout.
+	  To build this driver as a module, choose M here. The module is
+	  called malibu-dc9x00.
