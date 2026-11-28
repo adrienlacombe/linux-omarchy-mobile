@@ -1512,9 +1512,43 @@ static void malibu_mbfs_log_ufs_vote(struct malibu_cpm_domain *domain,
 			 domain->genpd.name, source, ret);
 }
 
+static bool display_be_selector4_gate;
+module_param(display_be_selector4_gate, bool, 0400);
+MODULE_PARM_DESC(display_be_selector4_gate, "Sample DPU LPCM selector 4 gate around BE votes");
+
+static bool malibu_mbfs_trace_be_gate(const struct malibu_cpm_domain *domain)
+{
+	return display_be_selector4_gate && domain->id == MALIBU_MBFS_DISPLAY_BE_ID;
+}
+
+static int malibu_cpm_sample_display_gate(struct malibu_cpm *cpm, u8 selector,
+					  const char *name, const char *phase)
+{
+	u32 command = malibu_cpm_command(MALIBU_CPM_CLOCK_SERVICE,
+					 MALIBU_CPM_DISPLAY_DOMAIN, selector,
+					 MALIBU_CPM_CLOCK_GET_STATUS);
+	s32 reply;
+	int ret;
+
+	/* D1 status op 2 with bit 0 set compares this cell's gate acknowledgment. */
+	ret = malibu_cpm_lpcm_request(cpm, command, BIT(0), MALIBU_CPM_CLOCK_TIMEOUT_MS, &reply);
+	if (ret)
+		dev_info(cpm->dev, "%s: %s transport=%d\n", name, phase, ret);
+	else
+		dev_info(cpm->dev, "%s: %s firmware=%d\n", name, phase, reply);
+	return ret;
+}
+
+static int malibu_cpm_sample_be_gate(struct malibu_cpm *cpm, const char *phase)
+{
+	return malibu_cpm_sample_display_gate(cpm, MALIBU_CPM_DISPLAY_BE_CLOCK,
+					      "display-be-selector4-gate", phase);
+}
+
 static int malibu_mbfs_lazy_on(struct malibu_cpm_domain *domain, const char **source)
 {
 	struct malibu_cpm *cpm = domain->cpm;
+	bool trace_be_gate = malibu_mbfs_trace_be_gate(domain);
 	bool on;
 	int ret;
 
@@ -1531,9 +1565,18 @@ static int malibu_mbfs_lazy_on(struct malibu_cpm_domain *domain, const char **so
 	if (on)
 		return 0;
 
+	if (trace_be_gate) {
+		*source = "gate-transport-error";
+		ret = malibu_cpm_sample_be_gate(cpm, "before-on");
+		if (ret)
+			return ret;
+	}
 	ret = malibu_mbfs_set_domain(domain, true);
-	if (!ret)
+	if (!ret) {
 		domain->powered_here = true;
+		if (trace_be_gate)
+			malibu_cpm_sample_be_gate(cpm, "after-on");
+	}
 	*source = ret ? "request-error" : "issued";
 	return ret;
 }
@@ -1739,22 +1782,6 @@ static bool display_dsi0_selector3_gate;
 module_param(display_dsi0_selector3_gate, bool, 0400);
 MODULE_PARM_DESC(display_dsi0_selector3_gate, "Sample DPU LPCM selector 3 gate with sibling checks");
 
-static void malibu_cpm_sample_dsi_phy_gate(struct malibu_cpm *cpm, const char *phase)
-{
-	u32 command = malibu_cpm_command(MALIBU_CPM_CLOCK_SERVICE,
-					 MALIBU_CPM_DISPLAY_DOMAIN, MALIBU_CPM_DSI_PHY_CLOCK,
-					 MALIBU_CPM_CLOCK_GET_STATUS);
-	s32 reply;
-	int ret;
-
-	/* D1 status op 2 with bit 0 set compares this cell's gate acknowledgment. */
-	ret = malibu_cpm_lpcm_request(cpm, command, BIT(0), MALIBU_CPM_CLOCK_TIMEOUT_MS, &reply);
-	if (ret)
-		dev_info(cpm->dev, "display-dsi0-selector3-gate: %s transport=%d\n", phase, ret);
-	else
-		dev_info(cpm->dev, "display-dsi0-selector3-gate: %s firmware=%d\n", phase, reply);
-}
-
 static bool malibu_mbfs_trace_dsi0_siblings(const struct malibu_cpm_domain *domain)
 {
 	return display_dsi0_siblings && domain->id == MALIBU_MBFS_DISPLAY_DSI0_ID;
@@ -1783,7 +1810,8 @@ static int malibu_mbfs_sample_dsi0_siblings(struct malibu_cpm *cpm, const char *
 
 	/* Gate diagnostics must not interfere with releasing votes we own. */
 	if (display_dsi0_selector3_gate && !result)
-		malibu_cpm_sample_dsi_phy_gate(cpm, phase);
+		malibu_cpm_sample_display_gate(cpm, MALIBU_CPM_DSI_PHY_CLOCK,
+					       "display-dsi0-selector3-gate", phase);
 	return result;
 }
 
@@ -1864,6 +1892,7 @@ static int malibu_mbfs_power_off(struct generic_pm_domain *genpd)
 {
 	struct malibu_cpm_domain *domain = container_of(genpd, struct malibu_cpm_domain, genpd);
 	bool trace_siblings = malibu_mbfs_trace_dsi0_siblings(domain);
+	bool trace_be_gate = malibu_mbfs_trace_be_gate(domain);
 	int ret;
 
 	if (malibu_ufs_idle_diag(domain->cpm) &&
@@ -1876,11 +1905,16 @@ static int malibu_mbfs_power_off(struct generic_pm_domain *genpd)
 	/* Observation failures must never prevent releasing an owned vote. */
 	if (trace_siblings)
 		malibu_mbfs_sample_dsi0_siblings(domain->cpm, "before-off");
+	if (trace_be_gate)
+		malibu_cpm_sample_be_gate(domain->cpm, "before-off");
 	ret = malibu_mbfs_set_domain(domain, false);
 	if (trace_siblings && !ret)
 		malibu_mbfs_sample_dsi0_siblings(domain->cpm, "after-off");
-	if (!ret)
+	if (!ret) {
 		domain->powered_here = false;
+		if (trace_be_gate)
+			malibu_cpm_sample_be_gate(domain->cpm, "after-off");
+	}
 	return ret;
 }
 
