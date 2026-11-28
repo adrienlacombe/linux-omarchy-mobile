@@ -93,6 +93,9 @@ static int malibu_dc9x00_sample_be_csr(struct platform_device *pdev, int irq)
 	value = readl(mux);
 	dev_info(dev, "BE CSR sampled raw=0x%08x mono_ns=%llu\n", value, ktime_get_mono_fast_ns());
 
+	/* Keep BE active across the driver core's runtime PM get/put at unbind. */
+	goto put_supplier;
+
 put_pm:
 	pm_runtime_put_sync(dev);
 put_supplier:
@@ -130,6 +133,12 @@ static int malibu_dc9x00_probe(struct platform_device *pdev)
 	return 0;
 }
 
+static void malibu_dc9x00_remove(struct platform_device *pdev)
+{
+	if (sample_be_csr)
+		pm_runtime_put_sync(&pdev->dev);
+}
+
 static const struct of_device_id malibu_dc9x00_of_match[] = {
 	{ .compatible = "google,malibu-dc9x00" },
 	{ }
@@ -138,6 +147,7 @@ MODULE_DEVICE_TABLE(of, malibu_dc9x00_of_match);
 
 static struct platform_driver malibu_dc9x00_driver = {
 	.probe = malibu_dc9x00_probe,
+	.remove = malibu_dc9x00_remove,
 	.driver = {
 		.name = "malibu-dc9x00",
 		.of_match_table = malibu_dc9x00_of_match,
